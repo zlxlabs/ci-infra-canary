@@ -2,59 +2,77 @@
 
 独立、无模型、低成本的 **GitHub Actions / self-hosted runner 主动 canary**。
 
-个人自用；不是平台。消费端（例如 AiUsageMonitor）只读 GitHub API，本仓不回调。
+个人自用；不是平台。消费端（例如 AiUsageMonitor）只读 GitHub API 或公开 release
+asset，本仓不回调业务仓库、Agent 或 Gate 队列。
 
-## 目的
+## 当前目标
 
-覆盖被动 SSH 哨兵无法证明的路径：
+每 30 分钟一次的 schedule 和 `workflow_dispatch` 都会真实执行 `make test`。运行结束
+后发布 schema v1 readiness evidence：
 
-1. Actions 控制面是否接受并调度作业  
-2. `ci` 池 runner 是否能领到并启动作业  
-3. 作业是否能在约定 toolchain 上跑通最小 smoke
+- 每 run 的 immutable artifact：`ci-readiness-evidence-v1-${run_id}-${run_attempt}`，入口文件为 `ci-readiness-evidence-v1.json`。
+- 固定 release/tag `ci-readiness-evidence-v1` 的最新公开 asset：
+  `https://github.com/zlxlabs/ci-infra-canary/releases/download/ci-readiness-evidence-v1/ci-readiness-evidence-v1.json`。
+- basic 测试失败时，先发布 failure evidence，再让 workflow 以非零状态结束。
+- `gate_review` 在尚无可用 no-PR Gate 入口前固定为 `execution_proven=false`、`outcome=unavailable`、`review_executed=false`、`verdict=unavailable`；不把普通 workflow 成功冒充 Gate READY。
+
+## Evidence v1
+
+顶层字段为 `schema_version=1`、`observed_at` 和 `lanes.basic_tests` /
+`lanes.gate_review`。每个 lane 都包含：
+
+`execution_proven`、`outcome`、`started_at`、`completed_at`、`duration_seconds`、
+`run_url`、`head_sha`、`run_attempt`、`trigger`、`cause_domain`、`cause_code`、
+`detail`。
+
+`basic_tests` 的 `outcome` 为 `success` 或 `failure`，`duration_seconds` 由实际
+开始/完成时间计算，必须是有限非负数。`gate_review` 额外包含
+`review_executed`、`verdict` 和 `audit_identity`；当前 verdict 只能诚实为
+`unavailable`，audit identity 为 `null`。
+
+JSON 使用 UTF-8、稳定排序键和固定分隔符写出，因此 per-run artifact 与 stable
+release asset 可以逐字节比较。
 
 ## 责任边界
 
 | 做 | 不做 |
 |---|---|
-| 每 30 分钟一次轻量 smoke | 调模型 / 业务仓 / 外部系统 |
-| 标签 `[self-hosted, linux, x64, ci]` | 用户 secrets、DB、artifact、自定义 action |
-| 输出 runner/OS 与 `python3`/`uv`/`node`/`pnpm`/`docker version` | 自动修复 runner、通知、重试风暴 |
-| 以 workflow run 元数据为结果契约 | 向 AiUsageMonitor 或其他系统写回 |
+| 每 30 分钟一次轻量、确定性 basic tests | 调模型 / 业务仓 / 外部系统 |
+| 标签 `[self-hosted, linux, x64, ci]` | 用户 secrets、数据库、自动 rerun |
+| 发布 per-run artifact 与最新公开 release asset | 创建 synthetic PR、控制 Agent 或 Gate |
+| 以 JSON evidence 作为只读消费契约 | 伪造 Gate primary 或 READY verdict |
 
-失败时 **不** 自动修 runner；排查顺序：标签 → runner group 仓库访问策略。回滚仅 **disable workflow**，保留历史 run。
+失败时不自动修 runner；排查顺序：标签 → runner group 仓库访问策略。回滚仅 disable
+workflow，保留历史 run。
 
-## 频率与入口
-
-- Schedule：`*/30 * * * *`（UTC）
-- Manual：`workflow_dispatch`
-
-Workflow 文件：`.github/workflows/canary.yml`（手写 ≤60 行，`timeout-minutes: 5`）。
-
-## 结果契约
-
-稳定契约 = GitHub Actions **workflow run** 对象字段（REST/GraphQL 同源），供只读消费：
-
-| 字段 | 含义 |
-|---|---|
-| `id` | run id |
-| `status` | `queued` / `in_progress` / `completed` … |
-| `conclusion` | 成功 `success`；失败为非 `success`（如 `failure`/`cancelled`/`timed_out`） |
-| `run_started_at` | 开始执行时间 |
-| `updated_at` | 最近更新 |
-| `html_url` | 人类可读 run URL |
-| `run_attempt` | 尝试次数 |
-| `head_sha` | 触发时的 commit SHA |
-
-可选观测（日志内，非 API 契约字段）：`runner_name`、排队时长 ≈ `run_started_at - created_at`、执行时长 ≈ `updated_at - run_started_at`（completed 时）。
-
-查询示例：
+## 本地验证
 
 ```bash
-gh api repos/zlxlabs/ci-infra-canary/actions/runs \
-  --jq '.workflow_runs[0] | {id,status,conclusion,run_started_at,updated_at,html_url,run_attempt,head_sha}'
+make test
+python3 -m unittest discover -s tests -p 'test_*.py'
+git diff --check
 ```
 
-## 手动验证
+生成一个本地 schema v1 fixture（不会创建 GitHub release）：
+
+```bash
+python3 scripts/build_evidence.py \
+  --output /tmp/ci-readiness-evidence-v1.json \
+  --observed-at 2026-08-09T00:00:30Z \
+  --basic-started-at 2026-08-09T00:00:00Z \
+  --basic-completed-at 2026-08-09T00:00:30Z \
+  --basic-outcome success \
+  --run-url https://github.com/zlxlabs/ci-infra-canary/actions/runs/0 \
+  --head-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --run-attempt 1 \
+  --trigger schedule \
+  --basic-detail 'local fixture'
+```
+
+## 手动入口
+
+合并后的真实入口由主脑按验收流程分别触发和观察；本实现阶段不执行
+`workflow_dispatch`，不创建 release，也不标记 ready：
 
 ```bash
 gh workflow run canary.yml --repo zlxlabs/ci-infra-canary

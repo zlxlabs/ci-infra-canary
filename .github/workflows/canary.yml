@@ -1,5 +1,5 @@
-# Minimal active canary for GitHub Actions control plane + self-hosted ci pool.
-# Result contract = workflow run metadata (status/conclusion/timestamps/url). No callbacks.
+# Basic readiness canary for the GitHub Actions control plane + self-hosted ci pool.
+# Gate review is intentionally not invoked here: there is no no-PR Gate entry yet.
 name: ci-infra-canary
 
 on:
@@ -8,28 +8,99 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  actions: write
+  contents: write
 
 jobs:
-  smoke:
+  basic-tests:
     runs-on: [self-hosted, linux, x64, ci]
     timeout-minutes: 5
     steps:
-      - name: Runner and OS info
-        run: |
-          set -euo pipefail
-          echo "runner_name=${RUNNER_NAME:-unknown}"
-          echo "runner_os=${RUNNER_OS:-unknown}"
-          echo "runner_arch=${RUNNER_ARCH:-unknown}"
-          uname -a
-          if [[ -f /etc/os-release ]]; then cat /etc/os-release; fi
+      - name: Checkout canary
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Toolchain smoke
+      - name: Run deterministic basic tests
+        id: basic_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -u -o pipefail
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          set +e
+          make test
+          exit_code=$?
+          set -e
+          completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo "started_at=${started_at}"
+            echo "completed_at=${completed_at}"
+            echo "exit_code=${exit_code}"
+          } >> "$GITHUB_OUTPUT"
+          exit "$exit_code"
+
+      - name: Build readiness evidence
+        id: evidence
+        if: always()
+        env:
+          BASIC_OUTCOME: ${{ steps.basic_tests.outcome }}
+          BASIC_STARTED_AT: ${{ steps.basic_tests.outputs.started_at }}
+          BASIC_COMPLETED_AT: ${{ steps.basic_tests.outputs.completed_at }}
+          BASIC_EXIT_CODE: ${{ steps.basic_tests.outputs.exit_code }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TRIGGER: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          python3 --version
-          uv --version
-          node --version
-          pnpm --version
-          # CI pool provides DinD; read-only probe only (no build/run).
-          docker version
+          python3 scripts/build_evidence.py \
+            --output ci-readiness-evidence-v1.json \
+            --observed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --basic-started-at "$BASIC_STARTED_AT" \
+            --basic-completed-at "$BASIC_COMPLETED_AT" \
+            --basic-outcome "$BASIC_OUTCOME" \
+            --run-url "$RUN_URL" \
+            --head-sha "$HEAD_SHA" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --trigger "$TRIGGER" \
+            --basic-detail "make test exit code ${BASIC_EXIT_CODE}"
+          python3 -m json.tool ci-readiness-evidence-v1.json >/dev/null
+
+      - name: Publish per-run evidence artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-readiness-evidence-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-readiness-evidence-v1.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish latest public release evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ci-readiness-evidence-v1
+          RELEASE_ASSET: ci-readiness-evidence-v1.json
+        run: |
+          set -euo pipefail
+          test -s "$RELEASE_ASSET"
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --notes "Latest schema v1 readiness evidence; Gate remains UNKNOWN until a real PR entry is available."
+          fi
+          gh release upload "$RELEASE_TAG" "$RELEASE_ASSET" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          echo "stable_url=https://github.com/zlxlabs/ci-infra-canary/releases/download/${RELEASE_TAG}/${RELEASE_ASSET}"
+
+      - name: Fail after publishing failure evidence
+        if: always()
+        env:
+          BASIC_OUTCOME: ${{ steps.basic_tests.outcome }}
+        run: |
+          if [[ "$BASIC_OUTCOME" != success ]]; then
+            echo "basic tests did not pass; failure evidence was published before this step"
+            exit 1
+          fi
