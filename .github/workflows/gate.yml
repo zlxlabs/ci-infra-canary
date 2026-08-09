@@ -1,0 +1,23 @@
+# Normal pull-request Gate checks for this repository. This caller is not a
+# scheduled Gate evidence source; publish-evidence.yml keeps that lane UNKNOWN.
+name: gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@66c803af972380f301329c761860c917f7799787
+    with:
+      tier: personal
+      runner: self
+      has_ui: false

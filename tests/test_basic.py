@@ -1,7 +1,7 @@
 import json
-import platform
 import sys
 import unittest
+from pathlib import Path
 
 
 class BasicCanaryTests(unittest.TestCase):
@@ -14,8 +14,16 @@ class BasicCanaryTests(unittest.TestCase):
         self.assertEqual(json.loads(encoded), payload)
         self.assertEqual(encoded, '{"checks":["python","json"],"suite":"basic"}')
 
-    def test_basic_suite_has_fixed_name(self):
-        self.assertEqual("basic_tests", "basic_" + "tests")
+    def test_canary_required_files_exist(self):
+        root = Path(__file__).parents[1]
+        for relative_path in (
+            ".github/workflows/canary.yml",
+            ".github/workflows/publish-evidence.yml",
+            ".github/workflows/gate.yml",
+            "Makefile",
+            "scripts/build_evidence.py",
+        ):
+            self.assertTrue((root / relative_path).is_file(), relative_path)
 
 
 if __name__ == "__main__":
