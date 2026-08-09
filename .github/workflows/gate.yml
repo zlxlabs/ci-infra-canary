@@ -16,8 +16,10 @@ permissions:
 
 jobs:
   gate:
-    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@66c803af972380f301329c761860c917f7799787
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@7bd2bbd2e92c33d3e0381e38730beaff1f1d69e5
     with:
       tier: personal
       runner: self
       has_ui: false
+    secrets:
+      FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}

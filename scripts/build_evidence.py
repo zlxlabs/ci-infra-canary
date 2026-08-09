@@ -32,7 +32,6 @@ def parse_utc_timestamp(value: object, field_name: str) -> datetime:
         raise ValueError(f"{field_name} must include a timezone")
     return parsed.astimezone(timezone.utc)
 
-
 def calculate_source_duration_seconds(created_at: str, updated_at: str) -> float:
     """Calculate trigger-to-terminal duration, including runner queue time."""
     created = parse_utc_timestamp(created_at, "created_at")
@@ -41,7 +40,6 @@ def calculate_source_duration_seconds(created_at: str, updated_at: str) -> float
     if not math.isfinite(duration) or duration < 0:
         raise ValueError("source updated_at must not precede created_at")
     return duration
-
 
 def _required_run_metadata(source_run: Mapping[str, object]) -> dict[str, object]:
     run_id = source_run.get("id")
@@ -76,15 +74,13 @@ def _required_run_metadata(source_run: Mapping[str, object]) -> dict[str, object
         "duration_seconds": calculate_source_duration_seconds(created_at, updated_at),
     }
 
-
 def _jobs_list(jobs_payload: Mapping[str, object]) -> list[Mapping[str, object]]:
     jobs = jobs_payload.get("jobs")
     if not isinstance(jobs, list) or any(not isinstance(job, Mapping) for job in jobs):
         raise ValueError("jobs payload must contain a list of job objects")
     return jobs
 
-
-def extract_basic_step_outcome(jobs_payload: Mapping[str, object]) -> tuple[bool, str, str, str]:
+def extract_basic_step_outcome(source_run: Mapping[str, object], jobs_payload: Mapping[str, object]) -> tuple[bool, str, str, str]:
     """Read the exact basic job/step conclusion; missing execution stays UNKNOWN."""
     jobs = [job for job in _jobs_list(jobs_payload) if job.get("name") == BASIC_JOB_NAME]
     if len(jobs) != 1:
@@ -95,13 +91,15 @@ def extract_basic_step_outcome(jobs_payload: Mapping[str, object]) -> tuple[bool
     matching = [step for step in steps if step.get("name") == BASIC_STEP_NAME]
     if len(matching) != 1:
         return False, "unavailable", "basic_tests", "basic_step_not_found"
-    conclusion = matching[0].get("conclusion")
+    conclusion, job_conclusion = matching[0].get("conclusion"), jobs[0].get("conclusion")
     if conclusion == "success":
-        return True, "success", "basic_tests", "passed"
+        if source_run.get("conclusion") == "success" and job_conclusion == "success":
+            return True, "success", "basic_tests", "passed"
+        failure_code = "source_run_failure" if source_run.get("conclusion") == "failure" else "basic_job_failure" if job_conclusion == "failure" else None
+        return (True, "failure", "basic_tests", failure_code) if failure_code else (False, "unavailable", "basic_tests", "terminal_status_not_success")
     if conclusion == "failure":
         return True, "failure", "basic_tests", "test_failure"
     return False, "unavailable", "basic_tests", f"basic_step_{conclusion or 'not_executed'}"
-
 
 def build_readiness_evidence(
     *, source_run: Mapping[str, object], jobs_payload: Mapping[str, object], observed_at: str
@@ -109,7 +107,7 @@ def build_readiness_evidence(
     """Build evidence from official run/job terminal facts, with Gate explicitly UNKNOWN."""
     metadata = _required_run_metadata(source_run)
     observed = parse_utc_timestamp(observed_at, "observed_at")
-    proven, outcome, cause_domain, cause_code = extract_basic_step_outcome(jobs_payload)
+    proven, outcome, cause_domain, cause_code = extract_basic_step_outcome(source_run, jobs_payload)
     common = {
         **metadata,
         "started_at": metadata["created_at"],
@@ -135,7 +133,6 @@ def build_readiness_evidence(
         "audit_identity": None,
     }
     return {"schema_version": EVIDENCE_SCHEMA_VERSION, "observed_at": observed.isoformat(timespec="seconds").replace("+00:00", "Z"), "source_run_id": metadata["run_id"], "lanes": {"basic_tests": basic_lane, "gate_review": gate_lane}}
-
 
 def _read_json_object(path: Path) -> dict[str, object]:
     try:

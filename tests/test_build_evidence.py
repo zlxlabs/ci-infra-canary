@@ -14,6 +14,7 @@ def source_run(*, run_id=42, attempt=2, created="2026-08-09T00:00:00Z", updated=
         "id": run_id,
         "name": "ci-infra-canary",
         "status": "completed",
+        "conclusion": "success",
         "event": "schedule",
         "created_at": created,
         "updated_at": updated,
@@ -67,6 +68,17 @@ class BuildEvidenceTests(unittest.TestCase):
         self.assertEqual(basic["outcome"], "failure")
         self.assertEqual(basic["cause_code"], "test_failure")
         self.assertEqual(basic["duration_seconds"], 1.0)
+
+    def test_failed_run_or_job_cannot_hide_behind_successful_step(self):
+        from scripts.build_evidence import build_readiness_evidence
+
+        for run_conclusion in ("failure", "success"):
+            run, jobs = source_run(), jobs_payload("success")
+            run["conclusion"] = run_conclusion
+            if run_conclusion == "success":
+                jobs["jobs"][0]["conclusion"] = "failure"
+            result = build_readiness_evidence(source_run=run, jobs_payload=jobs, observed_at="2026-08-09T00:31:00Z")
+            self.assertEqual(result["lanes"]["basic_tests"]["outcome"], "failure")
 
     def test_not_executed_fixture_is_unavailable(self):
         from scripts.build_evidence import build_readiness_evidence
