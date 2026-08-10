@@ -44,6 +44,10 @@ git diff --check
 合并后的真实入口由主脑按验收流程分别触发和观察；本实现阶段不执行 workflow_dispatch，
 不标记 ready，不 merge：
 
+首次接入顺序：合并实现 PR → 确认唯一长期 non-draft `ci/self-probe` PR → dispatch self-probe。
+验收只认该 dispatch 触发的 `pull_request:synchronize`，且 `gate/primary` 与 `gate/gate` 均为实际 SUCCESS；
+Draft 期间的绿色结果或任一 SKIPPED 均不算真实 Gate 证据。
+
 ```bash
 gh run list --repo zlxlabs/ci-infra-canary --workflow canary.yml --limit 3
 gh run view <run-id> --repo zlxlabs/ci-infra-canary \
