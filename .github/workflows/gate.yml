@@ -1,5 +1,5 @@
-# Normal pull-request Gate checks for this repository. This caller is not a
-# scheduled Gate evidence source; publish-evidence.yml keeps that lane UNKNOWN.
+# Normal pull-request Gate checks for this repository. The long-lived
+# ci/self-probe pull request enters this caller after each PAT push.
 name: gate
 
 on:

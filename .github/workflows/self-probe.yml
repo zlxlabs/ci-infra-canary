@@ -1,0 +1,74 @@
+name: ci-infra-canary-self-probe
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-self-probe
+  cancel-in-progress: true
+
+jobs:
+  self-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CI_CANARY_PUSH_TOKEN: ${{ secrets.CI_CANARY_PUSH_TOKEN }}
+    steps:
+      - name: Checkout canary main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact self-probe pull request
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_json="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f state=open \
+            -f head="${GITHUB_REPOSITORY_OWNER}:ci/self-probe" \
+            -f per_page=100)"
+          pr_count="$(jq 'length' <<<"${pr_json}")"
+          [[ "${pr_count}" == "1" ]] || {
+            echo "Expected exactly one open non-draft ci/self-probe pull request" >&2
+            exit 1
+          }
+          jq -e --arg repository "${GITHUB_REPOSITORY}" '
+            length == 1
+            and .[0].draft == false
+            and .[0].base.ref == "main"
+            and .[0].base.repo.full_name == $repository
+            and .[0].head.ref == "ci/self-probe"
+            and .[0].head.repo.full_name == $repository
+          ' <<<"${pr_json}" >/dev/null
+
+      - name: Rebuild and push exact self-probe branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${CI_CANARY_PUSH_TOKEN}" ]] || {
+            echo "CI_CANARY_PUSH_TOKEN is required for self-probe push" >&2
+            exit 1
+          }
+          git fetch --no-tags origin main \
+            refs/heads/ci/self-probe:refs/remotes/origin/ci/self-probe
+          old_sha="$(git rev-parse refs/remotes/origin/ci/self-probe)"
+          git reset --hard origin/main
+          git clean -fdx
+          printf '%s\n' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" > .ci-self-probe
+          git add .ci-self-probe
+          git -c user.name='ci-infra-canary self-probe' \
+            -c user.email='ci-infra-canary@users.noreply.github.com' \
+            commit -m 'ci: self-probe'
+          auth="$(printf 'x-access-token:%s' "${CI_CANARY_PUSH_TOKEN}" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            push origin "HEAD:refs/heads/ci/self-probe" \
+            --force-with-lease=refs/heads/ci/self-probe:${old_sha}

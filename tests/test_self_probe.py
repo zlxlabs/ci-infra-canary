@@ -13,7 +13,8 @@ class SelfProbeWorkflowContractTests(unittest.TestCase):
     def test_self_probe_is_a_replaceable_ubuntu_schedule(self):
         self.assertRegex(self.workflow, r"cron:\s*[\"']\*/30 \* \* \* \*[\"']")
         self.assertRegex(self.workflow, r"runs-on:\s*ubuntu-latest")
-        self.assertRegex(self.workflow, r"concurrency:\s*\n(?:\s+.*\n)*\s+cancel-in-progress:\s*true")
+        self.assertIn("  group: ci-self-probe", self.workflow)
+        self.assertIn("  cancel-in-progress: true", self.workflow)
 
     def test_self_probe_uses_read_only_pr_metadata_and_pat_for_push(self):
         self.assertRegex(self.workflow, r"pull-requests:\s*read")
@@ -21,9 +22,10 @@ class SelfProbeWorkflowContractTests(unittest.TestCase):
         self.assertIn("CI_CANARY_PUSH_TOKEN: ${{ secrets.CI_CANARY_PUSH_TOKEN }}", self.workflow)
         self.assertIn("gh api", self.workflow)
         self.assertRegex(self.workflow, r"state[= ]+open")
-        self.assertRegex(self.workflow, r"base[= ]+main")
+        self.assertNotIn("-f base=main", self.workflow)
         self.assertIn("ci/self-probe", self.workflow)
         self.assertRegex(self.workflow, r"draft\s*==\s*false|draft\s*!=\s*true")
+        self.assertIn('.[0].base.ref == "main"', self.workflow)
 
     def test_self_probe_rebuilds_main_and_uses_exact_force_with_lease(self):
         self.assertRegex(self.workflow, r"git fetch .*origin.*main")
