@@ -18,12 +18,20 @@ class BasicCanaryTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         for relative_path in (
             ".github/workflows/canary.yml",
-            ".github/workflows/publish-evidence.yml",
             ".github/workflows/gate.yml",
+            ".github/workflows/self-probe.yml",
             "Makefile",
-            "scripts/build_evidence.py",
         ):
             self.assertTrue((root / relative_path).is_file(), relative_path)
+
+    def test_evidence_publisher_paths_are_removed(self):
+        root = Path(__file__).parents[1]
+        for relative_path in (
+            ".github/workflows/publish-evidence.yml",
+            "scripts/build_evidence.py",
+            "tests/test_build_evidence.py",
+        ):
+            self.assertFalse((root / relative_path).exists(), relative_path)
 
 
 if __name__ == "__main__":

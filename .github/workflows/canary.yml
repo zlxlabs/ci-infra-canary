@@ -1,5 +1,4 @@
-# Source run only: readiness evidence is published by publish-evidence.yml
-# after GitHub reports this workflow's official terminal timestamps.
+# Deterministic basic tests are the only source facts this canary produces.
 name: ci-infra-canary
 
 on:
