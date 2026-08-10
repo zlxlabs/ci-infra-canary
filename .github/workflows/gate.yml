@@ -1,0 +1,25 @@
+# Normal pull-request Gate checks for this repository. The long-lived
+# ci/self-probe pull request enters this caller after each PAT push.
+name: gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@7bd2bbd2e92c33d3e0381e38730beaff1f1d69e5
+    with:
+      tier: personal
+      runner: self
+      has_ui: false
+    secrets:
+      FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}

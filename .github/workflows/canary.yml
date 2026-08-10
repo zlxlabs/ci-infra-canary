@@ -1,5 +1,4 @@
-# Minimal active canary for GitHub Actions control plane + self-hosted ci pool.
-# Result contract = workflow run metadata (status/conclusion/timestamps/url). No callbacks.
+# Deterministic basic tests are the only source facts this canary produces.
 name: ci-infra-canary
 
 on:
@@ -11,25 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
+  basic-tests:
     runs-on: [self-hosted, linux, x64, ci]
     timeout-minutes: 5
     steps:
-      - name: Runner and OS info
-        run: |
-          set -euo pipefail
-          echo "runner_name=${RUNNER_NAME:-unknown}"
-          echo "runner_os=${RUNNER_OS:-unknown}"
-          echo "runner_arch=${RUNNER_ARCH:-unknown}"
-          uname -a
-          if [[ -f /etc/os-release ]]; then cat /etc/os-release; fi
+      - name: Checkout canary
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Toolchain smoke
-        run: |
-          set -euo pipefail
-          python3 --version
-          uv --version
-          node --version
-          pnpm --version
-          # CI pool provides DinD; read-only probe only (no build/run).
-          docker version
+      - name: Run deterministic basic tests
+        run: make test
