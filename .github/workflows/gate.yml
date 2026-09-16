@@ -23,3 +23,6 @@ jobs:
       has_ui: false
     secrets:
       FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}
+      # 透传 zlxlabs org 级 Silo 凭据（配合 gate 仓 Silo 迁移）
+      SILO_ACCESS_KEY: ${{ secrets.SILO_ACCESS_KEY }}
+      SILO_SECRET_KEY: ${{ secrets.SILO_SECRET_KEY }}
