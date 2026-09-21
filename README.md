@@ -58,6 +58,11 @@ gh run view <run-id> --repo zlxlabs/ci-infra-canary \
 通过 `pull_request:synchronize` 使用同一 caller，Gate 结果直接以 GitHub 官方 checks
 呈现。
 
+canary 的 gate run 成功结束后，`notify-gate.yml` 通过 `workflow_run` 通知 `zlxlabs/gate`
+重新评估 v2 抬升，发送固定事件 `canary-verified`。它使用 `GATE_DISPATCH_TOKEN` secret；
+必须挂在 `workflow_run` 上，因为 gate run 内的 job 执行时该 run 的 `conclusion` 仍是 `null`，
+消费方无法据此确认 canary 已跑绿。
+
 ## 相关
 
 - 需求与验收：`zlxlabs/gate-hub#247`
