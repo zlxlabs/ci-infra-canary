@@ -1,0 +1,29 @@
+# This must be a separate workflow_run workflow, not another job in gate.yml.
+# A job inside the gate run would notify while that run's conclusion is still
+# null, so gate would reject the canary evidence before the run reached a final
+# state.
+name: notify-gate
+
+on:
+  workflow_run:
+    workflows: ["gate"]
+    types: [completed]
+
+jobs:
+  notify-gate:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Notify gate of verified canary
+        env:
+          GH_TOKEN: ${{ secrets.GATE_DISPATCH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${GH_TOKEN}" ]] || {
+            echo "GATE_DISPATCH_TOKEN is required" >&2
+            exit 1
+          }
+          gh api --method POST repos/zlxlabs/gate/dispatches -f event_type=canary-verified
