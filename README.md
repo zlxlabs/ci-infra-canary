@@ -15,6 +15,8 @@ basic workflow 的 job/step 名固定为 `basic-tests` / `Run deterministic basi
 non-draft PR（base 必须是 `main`），然后从 `origin/main` 重建一个 marker 提交并以精确
 旧 SHA 做 `--force-with-lease` 推送。PAT 推送触发该 PR 的真实 `pull_request:synchronize`，
 由现有 Gate caller 执行真实 Gate。探针不等待或解释 Gate，也不操作其他 PR、分支或 Agent。
+每轮先比较 gate 仓 `refs/tags/v2` 与 `refs/heads/main`；相同则在 checkout canary 前退出，
+取值失败或缺 ref 会记为 `unknown` 并继续完整探针流程。
 
 主仓消费端直接读取 GitHub 官方 Actions runs/jobs、PR 和 checks API；这些官方事实是唯一
 的结果来源。缺失、重复、draft 或 head/base 不匹配的 self-probe PR 都会使探针失败。
