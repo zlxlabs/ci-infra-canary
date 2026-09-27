@@ -21,7 +21,32 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       CI_CANARY_PUSH_TOKEN: ${{ secrets.CI_CANARY_PUSH_TOKEN }}
     steps:
+      - name: Check whether Gate v2 has new content
+        id: gate-state
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! refs="$(timeout 15s git ls-remote https://github.com/zlxlabs/gate.git \
+            refs/tags/v2 'refs/tags/v2^{}' refs/heads/main 2>/dev/null)"; then
+            echo "CANARY-NOOP-V1 state=unknown reason=git-ls-remote-failed"
+            echo "state=unknown" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          v2_sha="$(awk '$2 == "refs/tags/v2^{}" { print $1; exit }' <<<"${refs}")"
+          [[ -n "${v2_sha}" ]] || v2_sha="$(awk '$2 == "refs/tags/v2" { print $1; exit }' <<<"${refs}")"
+          main_sha="$(awk '$2 == "refs/heads/main" { print $1; exit }' <<<"${refs}")"
+          if [[ -z "${v2_sha}" || -z "${main_sha}" ]]; then
+            echo "CANARY-NOOP-V1 state=unknown reason=gate-ref-missing"
+            echo "state=unknown" >> "${GITHUB_OUTPUT}"
+          elif [[ "${v2_sha}" == "${main_sha}" ]]; then
+            echo "CANARY-NOOP-V1 state=unchanged sha=${main_sha}"
+            echo "state=unchanged" >> "${GITHUB_OUTPUT}"
+          else
+            echo "CANARY-NOOP-V1 state=changed v2=${v2_sha} main=${main_sha}"
+            echo "state=changed" >> "${GITHUB_OUTPUT}"
+          fi
       - name: Checkout canary main
+        if: steps.gate-state.outputs.state != 'unchanged'
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: main
@@ -29,6 +54,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify exact self-probe pull request
+        if: steps.gate-state.outputs.state != 'unchanged'
         shell: bash
         run: |
           set -euo pipefail
@@ -51,6 +77,7 @@ jobs:
           ' <<<"${pr_json}" >/dev/null
 
       - name: Rebuild and push exact self-probe branch
+        if: steps.gate-state.outputs.state != 'unchanged'
         shell: bash
         run: |
           set -euo pipefail
@@ -71,4 +98,4 @@ jobs:
           auth="$(printf 'x-access-token:%s' "${CI_CANARY_PUSH_TOKEN}" | base64 -w0)"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
             push origin "HEAD:refs/heads/ci/self-probe" \
-            --force-with-lease=refs/heads/ci/self-probe:${old_sha}
+            "--force-with-lease=refs/heads/ci/self-probe:${old_sha}"
