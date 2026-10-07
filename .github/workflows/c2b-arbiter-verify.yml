@@ -1,0 +1,26 @@
+# TEMP (C2b arbiter-shadow verification, dispatch dlg-20261007-022903-ab60ab):
+# a throwaway caller that runs the reusable workflow at the reviewed gate branch
+# instead of @main. tests/test_gate.py only constrains gate.yml, so this file does
+# not disturb the canary's own contract; it is deleted with this branch.
+name: c2b-arbiter-verify
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@fb513d550c926612ac3105dc85f3e9d6200a2c7c
+    with:
+      tier: personal
+      runner: self
+      has_ui: false
+    secrets:
+      FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}
+      SILO_ACCESS_KEY: ${{ secrets.SILO_ACCESS_KEY }}
+      SILO_SECRET_KEY: ${{ secrets.SILO_SECRET_KEY }}
