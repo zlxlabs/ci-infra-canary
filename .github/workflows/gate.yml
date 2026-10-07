@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   gate:
-    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@main
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@fb513d550c926612ac3105dc85f3e9d6200a2c7c  # TEMP C2b arbiter-shadow verification pin
     with:
       tier: personal
       runner: self
