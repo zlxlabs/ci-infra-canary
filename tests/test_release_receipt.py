@@ -8,12 +8,14 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github/workflows/release-receipt.yml"
 GATE = ROOT / ".github/workflows/gate.yml"
-SCHEMA = "gate-hub.release-receipt-request.v1"
+SCHEMA = "gate-hub.release-receipt-request.v2"
 ANCHOR = "RELEASE-RECEIPT-REQUEST-INVALID"
 FP = "012345abcdef"
 HOST_BOTH, HOST_CI = "ci-01", "ci-03"
-LABEL_BOTH = f"canary-{FP}-{HOST_BOTH}"
-LABEL_CI = f"canary-{FP}-{HOST_CI}"
+CI_LABEL_BOTH = f"canary-{FP}-{HOST_BOTH}-ci"
+REVIEW_LABEL_BOTH = f"canary-{FP}-{HOST_BOTH}-review"
+CI_LABEL_CI = f"canary-{FP}-{HOST_CI}-ci"
+LEGACY_LABEL_BOTH = f"canary-{FP}-{HOST_BOTH}"
 
 
 def _extract_reader_script(workflow: str) -> str:
@@ -33,8 +35,8 @@ def _payload(**overrides):
         "roll_id": "roll-1",
         "fingerprint": FP,
         "host": HOST_BOTH,
-        "ci_label": LABEL_BOTH,
-        "review_label": LABEL_BOTH,
+        "ci_label": CI_LABEL_BOTH,
+        "review_label": REVIEW_LABEL_BOTH,
     }
     data.update(overrides)
     return json.dumps(data, separators=(",", ":"))
@@ -103,20 +105,31 @@ class ReleaseReceiptReaderScriptTests(unittest.TestCase):
             )
             return result, output.read_bytes()
 
-    def test_valid_both_labels_write_exact_bytes(self):
+    def test_valid_both_labels_write_exact_distinct_bytes(self):
         result, out = self._run(_payload())
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(out, f"ci_label={LABEL_BOTH}\nreview_label={LABEL_BOTH}\n".encode())
+        self.assertEqual(
+            out,
+            f"ci_label={CI_LABEL_BOTH}\nreview_label={REVIEW_LABEL_BOTH}\n".encode(),
+        )
 
     def test_valid_ci_only_writes_empty_review_verbatim(self):
-        result, out = self._run(_payload(host=HOST_CI, ci_label=LABEL_CI, review_label=""))
+        result, out = self._run(_payload(host=HOST_CI, ci_label=CI_LABEL_CI, review_label=""))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(out, f"ci_label={LABEL_CI}\nreview_label=\n".encode())
+        self.assertEqual(out, f"ci_label={CI_LABEL_CI}\nreview_label=\n".encode())
 
     def test_invalid_inputs_fail_loud_without_label_lines(self):
         cases = {
             "schema": _payload(schema="nope"),
+            "schema-v1-rejected": _payload(schema="gate-hub.release-receipt-request.v1"),
             "fingerprint": _payload(fingerprint="ABCDEF012345"),
+            "legacy-suffixless-label": _payload(
+                ci_label=LEGACY_LABEL_BOTH, review_label=LEGACY_LABEL_BOTH
+            ),
+            "suffix-swapped": _payload(
+                ci_label=f"canary-{FP}-{HOST_BOTH}-review",
+                review_label=f"canary-{FP}-{HOST_BOTH}-ci",
+            ),
             "label-mismatch": _payload(ci_label="canary-nope"),
             "labels-empty": _payload(ci_label="", review_label=""),
             "not-json": "{not json",

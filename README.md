@@ -35,9 +35,16 @@ non-draft PR（base 必须是 `main`），然后从 `origin/main` 重建一个 m
 workflow，保留历史 run。
 
 gate-hub 发布流水线会创建、推送并关闭分支 `release-receipt/<roll-id>` 上的短期非 draft
-PR（仅含 `.ci-release-receipt`），由 `release-receipt.yml` 调用 Gate v2（`@v2`）。这些 PR
+PR（仅含 `.ci-release-receipt`，schema `gate-hub.release-receipt-request.v2`），由
+`release-receipt.yml` 调用 Gate v2（`@v2`）。这些 PR
 **永不合并**；self-probe 不碰 `release-receipt/*`。workflow 名不是 `gate`，以免
 `notify-gate.yml` 误发 `canary-verified`。
+
+receipt 标签按类带后缀：`ci_label` 为空或恰等于 `canary-<fingerprint>-<host>-ci`，
+`review_label` 为空或恰等于 `canary-<fingerprint>-<host>-review`，至少一个非空；
+无后缀旧标签（`canary-<fingerprint>-<host>`）以 `RELEASE-RECEIPT-REQUEST-INVALID`
+拒绝。标签由 gate-hub 分别经 `extra_runner_label_ci` / `extra_runner_label_review`
+透传，确保 quality/review 各自落到同类 canary 槽。
 
 ## 本地验证
 
