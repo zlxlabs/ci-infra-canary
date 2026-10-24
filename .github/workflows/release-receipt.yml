@@ -1,0 +1,80 @@
+# Short-lived receipt PRs from the gate-hub release pipeline.
+# Workflow name must not be "gate": notify-gate.yml listens to workflows: ["gate"].
+name: release-receipt
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.ci-release-receipt'
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  reader:
+    if: startsWith(github.head_ref, 'release-receipt/') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      ci_label: ${{ steps.parse.outputs.ci_label }}
+      review_label: ${{ steps.parse.outputs.review_label }}
+    steps:
+      - name: Checkout receipt head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Parse release receipt request
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, sys
+          A = "RELEASE-RECEIPT-REQUEST-INVALID"
+          def fail(why):
+              print(f"{A} {why}")
+              sys.exit(1)
+          p = ".ci-release-receipt"
+          if not os.path.isfile(p):
+              fail("file-missing")
+          try:
+              data = json.loads(open(p, encoding="utf-8").read())
+          except (OSError, UnicodeError, json.JSONDecodeError):
+              fail("not-json")
+          if not isinstance(data, dict):
+              fail("not-json")
+          if data.get("schema") != "gate-hub.release-receipt-request.v1":
+              fail("schema")
+          fp = data.get("fingerprint")
+          if not isinstance(fp, str) or not re.fullmatch(r"[0-9a-f]{12}", fp):
+              fail("fingerprint")
+          host = data.get("host")
+          if not isinstance(host, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", host):
+              fail("host")
+          want = f"canary-{fp}-{host}"
+          ci, rev = data.get("ci_label"), data.get("review_label")
+          if not isinstance(ci, str) or ci not in ("", want):
+              fail("ci_label")
+          if not isinstance(rev, str) or rev not in ("", want):
+              fail("review_label")
+          if ci == "" and rev == "":
+              fail("labels-empty")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"ci_label={ci}\nreview_label={rev}\n")
+          PY
+  gate:
+    needs: reader
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@v2
+    with:
+      tier: personal
+      runner: self
+      has_ui: false
+      extra_runner_label_ci: ${{ needs.reader.outputs.ci_label }}
+      extra_runner_label_review: ${{ needs.reader.outputs.review_label }}
+    secrets:
+      FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}
+      SILO_ACCESS_KEY: ${{ secrets.SILO_ACCESS_KEY }}
+      SILO_SECRET_KEY: ${{ secrets.SILO_SECRET_KEY }}
