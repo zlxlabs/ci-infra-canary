@@ -21,6 +21,11 @@ jobs:
       tier: personal
       runner: self
       has_ui: false
+      # gate-hub#1724 / issue#25: 转发仓库变量给 gate-v2 定向标签输入
+      # （extra_runner_label_ci/review，gate#380）。变量未设时为空串，
+      # gate-v2 行为与现在逐字一致；self-probe 从 main 重建 ci/self-probe 时自带。
+      extra_runner_label_ci: ${{ vars.GATEHUB_CANARY_RUNNER_LABEL_CI }}
+      extra_runner_label_review: ${{ vars.GATEHUB_CANARY_RUNNER_LABEL_REVIEW }}
     secrets:
       FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}
       # 透传 zlxlabs org 级 Silo 凭据（配合 gate 仓 Silo 迁移）

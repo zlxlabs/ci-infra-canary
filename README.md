@@ -28,10 +28,29 @@ non-draft PR（base 必须是 `main`），然后从 `origin/main` 重建一个 m
 | 每 30 分钟一次轻量、确定性 basic tests | 调模型、业务仓或外部系统 |
 | 标签 `[self-hosted, linux, x64, ci]` | 用户 secrets、数据库、自动 rerun |
 | 维护自有 `ci/self-probe` PR 的单个 marker 提交 | 创建 synthetic PR、控制其他 Agent 或 Gate 队列 |
+| 从 main 转发 canary 定向标签变量（gate.yml，见下节） | 操作 gate-hub 发布流水线的 receipt 通道 PR（唯一写者是流水线，见下节） |
 | 让 GitHub 官方 run/job/check 事实可直接查询 | 生成 evidence 文件、Release asset 或 READY verdict |
 
 失败时不自动修 runner；排查顺序：标签 → runner group 仓库访问策略。回滚仅 disable
 workflow，保留历史 run。
+
+## gate-hub 发布流水线 receipt 通道（声明，issue#25 / gate-hub#1724）
+
+gate-hub 发布流水线（`runner/release-pipeline/`）的 receipt 阶段需要一条与
+`ci/self-probe` 分开的长期 Gate 通道，避免两个写者共用分支/PR 互相取消：
+
+- 通道是分支 `ci/release-receipt`（base `main`）上的一个长期 open、非 draft PR，
+  内含非 Markdown 标记文件 `.ci-release-receipt`（`gate.yml` 的
+  `paths-ignore: '**.md'` 只豁免纯 Markdown 差异，标记文件保证 Gate 必触发）。
+- 该 PR 的创建与空 marker 推送由 gate-hub 发布流水线独家负责，本仓 workflow 不
+  创建、不推送、不合并它。
+- self-probe 不创建、不重建、不操作该分支与 PR，与 `ci/self-probe` 互不可见。
+  通道由主脑在实现 PR 合并后创建，本文先行声明契约。
+- 配套地，main 的 `gate.yml` 把仓库变量 `GATEHUB_CANARY_RUNNER_LABEL_CI` /
+  `GATEHUB_CANARY_RUNNER_LABEL_REVIEW` 转发给 gate-v2 输入
+  `extra_runner_label_ci` / `extra_runner_label_review`（gate#380）；变量未设时
+  为空串，行为与不带标签逐字一致。self-probe 每次从 main 重建 `ci/self-probe`
+  自带这两行，不再依赖只活在分支上的配置。
 
 ## 本地验证
 

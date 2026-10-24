@@ -15,3 +15,19 @@ class GateCallerContractTests(unittest.TestCase):
             r"(?m)^\s*uses:\s+zlxlabs/gate/\.github/workflows/gate-v2\.yml@main\s*$",
         )
         self.assertRegex(workflow, r"FEISHU_CI_WEBHOOK:\s*\$\{\{\s*secrets\.FEISHU_CI_WEBHOOK\s*\}\}")
+
+    def test_gate_caller_forwards_canary_runner_label_vars(self):
+        # issue#25 / gate-hub#1724：main 的 caller 必须把两个仓库变量转发给
+        # gate-v2 的定向标签输入（gate#380）。self-probe 每 30 分钟从 main
+        # 重建 ci/self-probe，只活在分支上的转发会被抹掉，所以这条断言锁的是
+        # main 自身：删任一行、或把 CI 变量交叉接到 review 输入，都必须变红。
+        workflow = (Path(__file__).parents[1] / ".github/workflows/gate.yml").read_text()
+        # 整行锚定（首尾空白容忍，其余逐字），注释行/被注释掉的转发都不算数。
+        self.assertRegex(
+            workflow,
+            r"(?m)^\s*extra_runner_label_ci:\s*\$\{\{\s*vars\.GATEHUB_CANARY_RUNNER_LABEL_CI\s*\}\}\s*$",
+        )
+        self.assertRegex(
+            workflow,
+            r"(?m)^\s*extra_runner_label_review:\s*\$\{\{\s*vars\.GATEHUB_CANARY_RUNNER_LABEL_REVIEW\s*\}\}\s*$",
+        )
