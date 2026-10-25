@@ -46,7 +46,7 @@ jobs:
               fail("not-json")
           if not isinstance(data, dict):
               fail("not-json")
-          if data.get("schema") != "gate-hub.release-receipt-request.v1":
+          if data.get("schema") != "gate-hub.release-receipt-request.v2":
               fail("schema")
           fp = data.get("fingerprint")
           if not isinstance(fp, str) or not re.fullmatch(r"[0-9a-f]{12}", fp):
@@ -54,11 +54,12 @@ jobs:
           host = data.get("host")
           if not isinstance(host, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", host):
               fail("host")
-          want = f"canary-{fp}-{host}"
+          want_ci = f"canary-{fp}-{host}-ci"
+          want_rev = f"canary-{fp}-{host}-review"
           ci, rev = data.get("ci_label"), data.get("review_label")
-          if not isinstance(ci, str) or ci not in ("", want):
+          if not isinstance(ci, str) or ci not in ("", want_ci):
               fail("ci_label")
-          if not isinstance(rev, str) or rev not in ("", want):
+          if not isinstance(rev, str) or rev not in ("", want_rev):
               fail("review_label")
           if ci == "" and rev == "":
               fail("labels-empty")
