@@ -1,1 +1,1 @@
-{"ci_label":"canary-73cae5cb895f-ci-i7-ci","fingerprint":"73cae5cb895f","host":"ci-i7","review_label":"canary-73cae5cb895f-ci-i7-review","roll_id":"20261025T023716Z-56ecb07f4dd6","schema":"gate-hub.release-receipt-request.v2"}
+{"ci_label":"canary-73cae5cb895f-ci-i5-ci","fingerprint":"73cae5cb895f","host":"ci-i5","review_label":"canary-73cae5cb895f-ci-i5-review","roll_id":"20261025T023716Z-56ecb07f4dd6","schema":"gate-hub.release-receipt-request.v2"}
