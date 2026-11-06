@@ -1,0 +1,25 @@
+name: e1-container-probe
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/e1-container-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  container-probe:
+    runs-on: [self-hosted, linux, x64, canary-83be0d2d87e9-ci-i5-ci]
+    container:
+      image: debian:bookworm-slim
+    timeout-minutes: 5
+    steps:
+      - name: Execute runner externals Node inside job container
+        shell: sh
+        run: |
+          set -eu
+          test -x /__e/node24/bin/node
+          /__e/node24/bin/node --version
+          sleep 30
