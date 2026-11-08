@@ -7,9 +7,10 @@ evidence、Release asset 或其他消费端 schema。
 
 ## 当前目标
 
-`ci-infra-canary` 每 30 分钟由 schedule（也可手动 dispatch）运行确定性的 `make test`。
+`ci-infra-canary` 每 30 分钟由 schedule（也可手动 dispatch）运行确定性的
+`python3 -m unittest discover -s tests -p 'test_*.py' -v`（零第三方依赖）。
 basic workflow 的 job/step 名固定为 `basic-tests` / `Run deterministic basic tests`，
-运行标签为 `[self-hosted, linux, x64, ci]`。
+运行标签为 `[self-hosted, linux, x64, ci]`。canary 走 gate 直跑 pytest 以产出证据行。
 
 同样每 30 分钟，self-probe 在 `ubuntu-latest` 上验证唯一的 `ci/self-probe` open
 non-draft PR（base 必须是 `main`），然后从 `origin/main` 重建一个 marker 提交并以精确
@@ -49,8 +50,8 @@ receipt 标签按类带后缀：`ci_label` 为空或恰等于 `canary-<fingerpri
 ## 本地验证
 
 ```bash
-make test
-python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+uv run --frozen pytest -q
 git diff --check
 ```
 
