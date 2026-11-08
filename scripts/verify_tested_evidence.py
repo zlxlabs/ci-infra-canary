@@ -34,13 +34,15 @@ def main(argv):
         fail("bad_expected_head", f"want={want_head}")
     with open(log_path, "rb") as fh:
         raw_lines = fh.read().decode("utf-8").split("\n")
+    # BOM 是文件级伪影：必须先于逐行时间戳剥离去掉，否则首行「BOM+时间戳」
+    # 会让锚定的 TS.match 失败、时间戳残留（与参考实现的顺序差异，见报告偏差节）。
+    raw_lines[0] = raw_lines[0].lstrip("\ufeff")
     lines = []
     for raw in raw_lines:
         if raw.endswith("\r"):
             raw = raw[:-1]
         m = TS.match(raw)
         lines.append(raw[m.end():] if m else raw)
-    lines[0] = lines[0].lstrip("\ufeff")
 
     starts = [i for i, l in enumerate(lines) if l == HEADER]
     if len(starts) == 0:
