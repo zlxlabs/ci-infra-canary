@@ -56,5 +56,6 @@ jobs:
           fi
           job_id="$(printf '%s' "$jobs_json" | jq -r '[.jobs[] | select(.name == "gate / quality")][0].id')"
           log="${RUNNER_TEMP}/quality-job-${job_id}.log"
-          gh api "repos/${{ github.repository }}/actions/jobs/${job_id}/logs" > "$log"
+          # 日志正文含 ANSI 转义字节，新版 gh 默认拒绝输出（判定脚本按字节处理，无需清洗）
+          gh api --allow-escape-sequences "repos/${{ github.repository }}/actions/jobs/${job_id}/logs" > "$log"
           python3 scripts/verify_tested_evidence.py "$log" "$EXPECTED_HEAD_SHA"
