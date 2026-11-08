@@ -21,6 +21,8 @@ class BasicCanaryTests(unittest.TestCase):
             ".github/workflows/gate.yml",
             ".github/workflows/self-probe.yml",
             "Makefile",
+            "pyproject.toml",
+            "uv.lock",
         ):
             self.assertTrue((root / relative_path).is_file(), relative_path)
 
