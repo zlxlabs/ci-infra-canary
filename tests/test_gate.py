@@ -15,3 +15,12 @@ class GateCallerContractTests(unittest.TestCase):
             r"(?m)^\s*uses:\s+zlxlabs/gate/\.github/workflows/gate-v2\.yml@main\s*$",
         )
         self.assertRegex(workflow, r"FEISHU_CI_WEBHOOK:\s*\$\{\{\s*secrets\.FEISHU_CI_WEBHOOK\s*\}\}")
+
+    def test_tested_evidence_job_contract(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/gate.yml").read_text()
+        # 跨仓日志权限只能在 canary 侧判定，见 README「tested-evidence」一节。
+        self.assertRegex(workflow, r"(?m)^  tested-evidence:\s*$")
+        # 等 gate（可重用调用 job）全部结束后才读同 run 日志
+        self.assertRegex(workflow, r"(?m)^    needs: gate\s*$")
+        # 判定走本仓脚本，不宽泛搜索整份日志
+        self.assertRegex(workflow, r"python3 scripts/verify_tested_evidence\.py")

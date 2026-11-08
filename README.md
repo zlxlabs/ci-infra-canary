@@ -79,6 +79,20 @@ canary 的 gate run 成功结束后，`notify-gate.yml` 通过 `workflow_run` �
 必须挂在 `workflow_run` 上，因为 gate run 内的 job 执行时该 run 的 `conclusion` 仍是 `null`，
 消费方无法据此确认 canary 已跑绿。
 
+gate.yml 在 `gate` job 之后还有一个 `tested-evidence` job（`needs: gate`，
+`ubuntu-latest`，超时 5 分钟，job 级权限只给 `actions: read` + `contents: read`）：
+它用 `gh api` 取同一次 run、同一 attempt 的 job 列表，要求恰好一个名为
+`gate / quality` 的 job，下载其日志后由 `scripts/verify_tested_evidence.py`
+（纯标准库）严格判定：Emit 步骤输出区间内（唯一一行
+`##[group]Run python3 - <<'PY' || echo "::warning::GATE-TESTED-EVIDENCE-EMIT-FAILED"`
+起、其后第一个 `##[endgroup]` 后、到下一个 `##[group]Run` 前）恰有一条
+`GATE-TESTED-EVIDENCE-V1 head_sha=<PR head> merge_sha=<40hex> mode=pytest`，
+head_sha 必须等于 `github.event.pull_request.head.sha`，区间内不得出现
+EMIT-FAILED。不满足则打印 `TESTED-EVIDENCE-CHECK reason=<枚举>` 并使本 job 失败，
+从而整次 run conclusion=failure，notify-gate 不发、v2-tag-sync 不选。判定必须在
+canary 仓内做：跨仓 job 日志（`actions/jobs/{id}/logs`）只能由本仓 token 的
+`actions: read` 读取，gate 仓自己的 token 会 403；gate 侧只能查公开的 job 元数据。
+
 ## 相关
 
 - 需求与验收：`zlxlabs/gate-hub#247`
