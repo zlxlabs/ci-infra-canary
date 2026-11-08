@@ -27,3 +27,35 @@ jobs:
       # 透传 zlxlabs org 级 Silo 凭据（配合 gate 仓 Silo 迁移）
       SILO_ACCESS_KEY: ${{ secrets.SILO_ACCESS_KEY }}
       SILO_SECRET_KEY: ${{ secrets.SILO_SECRET_KEY }}
+
+  # 严格校验同一次 run、同一 attempt 的 `gate / quality` 日志里 Emit 步骤
+  # 输出区间内的 GATE-TESTED-EVIDENCE-V1。判定必须在本仓做：跨仓 job 日志
+  # （actions/jobs/{id}/logs）只能由本仓 github.token 的 actions: read 读到，
+  # gate 仓自己的 token 会 403。本 job 失败则整次 run conclusion=failure，
+  # notify-gate 不发、v2-tag-sync 不选。
+  tested-evidence:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify GATE-TESTED-EVIDENCE-V1 in same-run gate / quality log
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          jobs_json="$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs")"
+          count="$(printf '%s' "$jobs_json" | jq '[.jobs[] | select(.name == "gate / quality")] | length')"
+          if [ "$count" -ne 1 ]; then
+            echo "TESTED-EVIDENCE-CHECK reason=quality_job_count_not_one count=$count"
+            exit 1
+          fi
+          job_id="$(printf '%s' "$jobs_json" | jq -r '[.jobs[] | select(.name == "gate / quality")][0].id')"
+          log="${RUNNER_TEMP}/quality-job-${job_id}.log"
+          # 日志正文含 ANSI 转义字节，新版 gh 默认拒绝输出（判定脚本按字节处理，无需清洗）
+          gh api --allow-escape-sequences "repos/${{ github.repository }}/actions/jobs/${job_id}/logs" > "$log"
+          python3 scripts/verify_tested_evidence.py "$log" "$EXPECTED_HEAD_SHA"
