@@ -51,3 +51,18 @@
 - **关键决策与已否决方案**：保留 BOM 派生用例（卡面派生清单未列，但它暴露了真实
   语义缺陷而非测试恒真）；已否决：删用例迁就参考实现顺序。
 - **下一步唯一动作**：推修复 commit，等新一轮 gate run 终态取证。
+
+## 阶段 5：第二轮红（gh 转义序列闸）→ 修复 → E2E 全绿
+
+- **当前阶段**：done
+- **本段结论**：run 42459548408：quality 33/33 绿，`tested-evidence` 首次真实运行即红，
+  runner gh（≥2.63）拒写含 ANSI 转义字节的日志响应，报错原文要求
+  `--allow-escape-sequences`；jobs 列表响应经字节级核验 0 个 ESC 字节，旗标只加在
+  日志下载一处。修复后 run 42460302091（attempt 1，head 2ff032f）：run 级
+  conclusion=success，`tested-evidence`（job 128669520157）success，日志第 138 行
+  打出 `TESTED-EVIDENCE-CHECK ok head_sha=2ff032f5500830119ea1d93665650e3543660fc8
+  mode=pytest`，head 与 PR head 逐字相等。附带证据：上一轮 tested-evidence 红 →
+  整 run failure → `gate / notify` SKIPPED，下游冻结路径真实存在。
+- **关键决策与已否决方案**：已否决：给 jobs 列表调用也加旗标（响应无 ESC 字节，
+  若未来含 ESC 会以 gh 自带报错响亮地红，可 grep，符合 fail-loud）。
+- **下一步唯一动作**：回填报告、过 report contract check、收尾。
