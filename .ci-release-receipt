@@ -1,0 +1,7 @@
+{
+  "schema": "gate-hub.release-receipt-request.v2",
+  "fingerprint": "7297231f131b",
+  "host": "ci-i7",
+  "ci_label": "canary-7297231f131b-ci-i7-ci",
+  "review_label": "canary-7297231f131b-ci-i7-review"
+}
