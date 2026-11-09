@@ -1,0 +1,7 @@
+{
+  "schema": "gate-hub.release-receipt-request.v2",
+  "fingerprint": "09d96dea4eac",
+  "host": "ci-03",
+  "ci_label": "canary-09d96dea4eac-ci-03-ci",
+  "review_label": ""
+}
