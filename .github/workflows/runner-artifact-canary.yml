@@ -4,8 +4,14 @@
 # workflow before batch-roll and validates the receipt artifact it uploads:
 # `runner-artifact-canary-receipt.v1.json` (schema runner-artifact-canary-receipt.v1).
 #
-# Non-goals: no local-registry leg (gate-hub#2225, separate card), no compose,
-# no container start, no service restart on the deploy host — pull/inspect/rmi only.
+# gate-hub#2246: the push goes through push_to_acr.sh's real dual-push path
+# (LOCAL_REGISTRY job env below), the local manifest digest is read back from
+# the registry itself, and n305 also pulls the local ref — the n305 local pull
+# is advisory-only (recorded in the receipt, never part of the verdict).
+# Non-goals: no cleanup of local-registry probe/buildcache tags
+# (gatehub-deploy-registry has no delete API; its 20 GiB whole-store sweep
+# covers them), no compose, no container start, no service restart on the
+# deploy host — pull/inspect/rmi only.
 name: runner-artifact-canary
 
 on:
@@ -96,6 +102,11 @@ jobs:
     timeout-minutes: 12
     env:
       ACR_REGISTRY: crpi-0vsre5argteykh9m.cn-guangzhou.personal.cr.aliyuncs.com
+      # Same level as ACR_REGISTRY: enables push_to_acr.sh's opt-in dual push
+      # (buildx docker-container driver, registry cache ref, local+ACR push) —
+      # the exact path the business repos take. Name-only access: the local
+      # registry's Let's Encrypt cert covers just this MagicDNS name.
+      LOCAL_REGISTRY: zlx-vm-work-i7-ci-runner.taile9071.ts.net:5001
       ACR_NAMESPACE: zlx-personal
       IMAGE_NAME: runner-artifact-canary
       DEPLOY_HOST: 100.68.21.80
@@ -188,12 +199,39 @@ jobs:
           printf 'runner-artifact-canary probe payload\n' > "$context/payload.txt"
           printf '%s' "$ACR_PASSWORD" | docker login \
             "$ACR_REGISTRY" -u "$ACR_USERNAME" --password-stdin
-          # LOCAL_REGISTRY empty: the local-registry leg is gate-hub#2225, out of
-          # scope here. PUSH_MAX_ATTEMPTS=1 keeps one failing push from eating
+          # LOCAL_REGISTRY comes from the job env (inherited by the script):
+          # this is the business repos' real dual-push path, not a parallel
+          # docker push. PUSH_MAX_ATTEMPTS=1 keeps one failing push from eating
           # the whole timeout budget.
-          LOCAL_REGISTRY='' PUSH_MAX_ATTEMPTS=1 \
+          PUSH_MAX_ATTEMPTS=1 \
             GIT_SHA="$git_sha_tag" BUILD_CONTEXT="$context" DOCKERFILE=Dockerfile \
             bash .ci-templates/scripts/push_to_acr.sh
+
+      - name: Read back local registry digest
+        id: local-digest
+        env:
+          GIT_SHA_TAG: ${{ steps.push.outputs.git_sha_tag }}
+        run: |
+          set -euo pipefail
+          fail() {
+            printf '%s' "$1" > "$RUNNER_TEMP/canary-failure-reason"
+            echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=$1"
+            exit 1
+          }
+          [ -n "$GIT_SHA_TAG" ] || fail local-push-failed
+          local_ref="$LOCAL_REGISTRY/$ACR_NAMESPACE/$IMAGE_NAME"
+          ref="$local_ref:$GIT_SHA_TAG"
+          # push_to_acr.sh downgrades a single-sided local push failure to a
+          # ::warning:: and still exits 0, so its exit code proves nothing;
+          # query the registry itself. Inspecting the local daemon's image
+          # store would read the cache, not the registry — forbidden here.
+          manifest="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}')" \
+            || fail local-push-failed
+          digest="$(printf '%s' "$manifest" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("digest",""))')" \
+            || fail local-push-failed
+          printf '%s' "$digest" | grep -qE '^sha256:[0-9a-f]{64}$' || fail local-push-failed
+          printf '%s' "$digest" > "$RUNNER_TEMP/canary-local-digest"
+          echo "local_digest=$digest" >> "$GITHUB_OUTPUT"
 
       # No tailscale step: the canary job only ever runs on self-hosted canary
       # slots whose host is itself in the tailnet, so it reaches n305
@@ -249,6 +287,52 @@ jobs:
             || fail deploy-host-acr-repo-digest-missing
           echo "deploy_image_id=$image_id" >> "$GITHUB_OUTPUT"
           echo "deploy_repo_digests=$repo_digests" >> "$GITHUB_OUTPUT"
+
+      # gate-hub#2246: advisory mirror of the ACR pull leg against the LOCAL
+      # registry. Recorded in the receipt as local_pull; must never fail the
+      # job (no continue-on-error either — the rc is captured with if so the
+      # receipt can tell pass/fail/skipped apart) and never feeds the verdict.
+      - name: Pull probe image from local registry on deploy host
+        id: local-pull
+        if: always()
+        env:
+          GIT_SHA_TAG: ${{ steps.push.outputs.git_sha_tag }}
+          LOCAL_DIGEST: ${{ steps.local-digest.outputs.local_digest }}
+        run: |
+          set -uo pipefail
+          status_file="$RUNNER_TEMP/canary-local-pull-status"
+          printf 'skipped' > "$status_file"
+          printf '[]' > "$RUNNER_TEMP/canary-local-pull-digests"
+          if [ -z "${GIT_SHA_TAG:-}" ] || [ -z "${LOCAL_DIGEST:-}" ]; then
+            echo "::notice::local pull skipped: no local digest (push or read-back did not succeed)"
+            exit 0
+          fi
+          local_ref="$LOCAL_REGISTRY/$ACR_NAMESPACE/$IMAGE_NAME"
+          ref="$local_ref:$GIT_SHA_TAG"
+          rc=0
+          # Same ssh credentials/known_hosts as the ACR deploy leg above.
+          if ! remote_out="$(ssh -i "$HOME/.ssh/id_deploy" \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=20 \
+            "$DEPLOY_SSH_USER@$DEPLOY_HOST" \
+            "set -u
+             docker pull '$ref'
+             echo \"LOCAL-REPO-DIGESTS:\$(docker image inspect --format '{{json .RepoDigests}}' '$ref')\"
+             docker rmi '$ref'
+            ")"; then
+            rc=$?
+          fi
+          digests="$(sed -n 's/^LOCAL-REPO-DIGESTS://p' <<<"$remote_out")"
+          [ -n "$digests" ] || digests='[]'
+          printf '%s' "$digests" > "$RUNNER_TEMP/canary-local-pull-digests"
+          # pass only when the whole remote chain (pull/inspect/rmi) succeeded
+          # AND RepoDigests carries exactly <local_ref>@<local_digest>.
+          if [ "$rc" -eq 0 ] && printf '%s' "$digests" | grep -qF "\"$local_ref@$LOCAL_DIGEST\""; then
+            printf 'pass' > "$status_file"
+          else
+            printf 'fail' > "$status_file"
+            echo "::warning::local registry pull on deploy host failed (rc=$rc) — recorded in receipt, verdict unaffected"
+          fi
+          exit 0
 
       - name: Delete ACR tag and verify removal
         id: cleanup
@@ -342,6 +426,8 @@ jobs:
           PUSH_CONCLUSION: ${{ steps.push.conclusion }}
           DEPLOY_CONCLUSION: ${{ steps.deploy.conclusion }}
           CLEANUP_CONCLUSION: ${{ steps.cleanup.conclusion }}
+          LOCAL_REGISTRY_ENV: ${{ env.LOCAL_REGISTRY }}
+          LOCAL_TAG: ${{ steps.push.outputs.git_sha_tag }}
           DOCKER_SERVER_VERSION: ${{ steps.identity.outputs.docker_server_version }}
           JOB_ID: ${{ steps.identity.outputs.job_id }}
           JOB_LABELS: ${{ steps.identity.outputs.job_labels }}
@@ -350,7 +436,7 @@ jobs:
           DEPLOY_REPO_DIGESTS: ${{ steps.deploy.outputs.deploy_repo_digests }}
         run: |
           python3 - <<'PY'
-          import json, os
+          import json, os, re
 
           temp = os.environ["RUNNER_TEMP"]
 
@@ -365,12 +451,26 @@ jobs:
           push_ok = os.environ["PUSH_CONCLUSION"] == "success"
           deploy_ok = os.environ["DEPLOY_CONCLUSION"] == "success"
           cleanup_ok = os.environ["CLEANUP_CONCLUSION"] == "success"
-          verdict = "pass" if (identity_ok and push_ok and deploy_ok and cleanup_ok) else "fail"
+          # Local push is a hard gate: the digest read back from the local
+          # registry must be a well-formed sha256 manifest digest.
+          local_digest = read_file("canary-local-digest", "")
+          local_ok = re.fullmatch(r"sha256:[0-9a-f]{64}", local_digest) is not None
+          verdict = "pass" if (identity_ok and push_ok and deploy_ok and cleanup_ok and local_ok) else "fail"
           cleanup_status = read_file("canary-cleanup-status", "unknown")
+          # local_pull is advisory-only: read for the receipt, never part of
+          # the verdict above.
+          local_pull_status = read_file("canary-local-pull-status", "skipped")
+          if local_pull_status not in ("pass", "fail", "skipped"):
+              local_pull_status = "skipped"
           if verdict == "pass":
               failure_reason = ""
           else:
-              failure_reason = read_file("canary-failure-reason", "unknown-step-failure")
+              failure_reason = read_file("canary-failure-reason", "")
+              if not failure_reason:
+                  # Every failing step writes its own reason; a missing file
+                  # with no valid local digest means the push/read-back leg
+                  # died without recording one.
+                  failure_reason = "local-push-failed" if not local_ok else "unknown-step-failure"
           receipt = {
               "schema": "runner-artifact-canary-receipt.v1",
               "roll_id": os.environ["ROLL_ID"],
@@ -386,6 +486,13 @@ jobs:
               "deploy_host": os.environ["DEPLOY_HOST_ENV"],
               "deploy_image_id": os.environ["DEPLOY_IMAGE_ID"],
               "deploy_repo_digests": json.loads(os.environ.get("DEPLOY_REPO_DIGESTS") or "[]"),
+              "local_ref": os.environ["LOCAL_REGISTRY_ENV"] + "/" + os.environ["ACR_NAMESPACE_ENV"] + "/" + os.environ["IMAGE_NAME_ENV"],
+              "local_tag": os.environ["LOCAL_TAG"],
+              "local_digest": local_digest if local_ok else None,
+              "local_pull": {
+                  "status": local_pull_status,
+                  "repo_digests": json.loads(read_file("canary-local-pull-digests") or "[]"),
+              },
               "cleanup": cleanup_status,
               "verdict": verdict,
               "failure_reason": failure_reason,

@@ -46,6 +46,10 @@ RECEIPT_FIELDS = (
     "deploy_host",
     "deploy_image_id",
     "deploy_repo_digests",
+    "local_ref",
+    "local_tag",
+    "local_digest",
+    "local_pull",
     "cleanup",
     "verdict",
     "failure_reason",
@@ -119,9 +123,58 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
             "| tr -c 'A-Za-z0-9._-' '-'",
             push,
         )
-        self.assertIn("LOCAL_REGISTRY='' PUSH_MAX_ATTEMPTS=1", push)
+        self.assertIn("PUSH_MAX_ATTEMPTS=1", push)
+        # The local-registry leg (gate-hub#2246) must go through the script's
+        # own opt-in dual-push path; the job env supplies LOCAL_REGISTRY.
+        self.assertNotIn("LOCAL_REGISTRY=''", push)
         self.assertIn("FROM scratch", push)
         self.assertIn("password-stdin", push)
+
+    def test_local_registry_job_env_constant_and_inherited_by_push_script(self):
+        env_block = job_block(self.text, "canary")
+        env_block = env_block[:env_block.index("    steps:")]
+        # Job-level constant, same level as ACR_REGISTRY; non-empty and the
+        # exact MagicDNS name (the registry cert covers only this name).
+        self.assertIn("LOCAL_REGISTRY: zlx-vm-work-i7-ci-runner.taile9071.ts.net:5001", env_block)
+        # push_to_acr.sh reads LOCAL_REGISTRY from its environment; the push
+        # step must not shadow the job env with an override.
+        push = step_block(self.text, "Build and push probe image to ACR")
+        self.assertNotIn("LOCAL_REGISTRY=", push)
+
+    def test_local_digest_readback_uses_registry_side_query(self):
+        readback = step_block(self.text, "Read back local registry digest")
+        # Registry-side query only — docker image inspect would read the local
+        # daemon cache and prove nothing about the push landing.
+        self.assertIn("docker buildx imagetools inspect \"$ref\" --format '{{json .Manifest}}'", readback)
+        self.assertNotIn("docker image inspect", readback)
+        # Well-formed sha256 manifest digest, stored for the receipt and
+        # exported as a step output for the n305 local-pull leg.
+        self.assertIn("grep -qE '^sha256:[0-9a-f]{64}$'", readback)
+        self.assertIn('printf \'%s\' "$digest" > "$RUNNER_TEMP/canary-local-digest"', readback)
+        self.assertIn('echo "local_digest=$digest" >> "$GITHUB_OUTPUT"', readback)
+
+    def test_local_pull_step_is_advisory_only(self):
+        local_pull = step_block(self.text, "Pull probe image from local registry on deploy host")
+        # rc must be captured with an explicit if so the receipt can record
+        # the outcome; continue-on-error would hide the status from it.
+        self.assertNotIn("continue-on-error", local_pull)
+        self.assertIn("if ! remote_out=", local_pull)
+        self.assertIn("rc=$?", local_pull)
+        # The step never fails the job: no failure marker, no exit 1, and an
+        # unconditional exit 0 at the end.
+        self.assertNotIn("RUNNER-ARTIFACT-CANARY-FAIL", local_pull)
+        self.assertNotIn("exit 1", local_pull)
+        self.assertTrue(local_pull.rstrip().endswith("exit 0"))
+        # Same ssh credentials and known_hosts wiring as the ACR deploy leg.
+        self.assertIn('ssh -i "$HOME/.ssh/id_deploy"', local_pull)
+        # pass requires RepoDigests to carry exactly <local_ref>@<local_digest>.
+        self.assertIn('grep -qF "\\"$local_ref@$LOCAL_DIGEST\\""', local_pull)
+        # Receipt files for all three statuses.
+        self.assertIn("canary-local-pull-status", local_pull)
+        self.assertIn("canary-local-pull-digests", local_pull)
+        # local_pull must not feed the verdict (see the receipt verdict line).
+        receipt = step_block(self.text, "Write receipt")
+        self.assertNotIn("local_pull_ok", receipt.split("verdict =")[1].splitlines()[0])
 
     def test_deploy_host_runs_only_pull_inspect_rmi_over_ssh(self):
         deploy = step_block(self.text, "Pull, inspect and remove probe image on deploy host")
@@ -163,13 +216,22 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
         for field in RECEIPT_FIELDS:
             self.assertIn(f'"{field}"', receipt, field)
         self.assertIn(
-            'verdict = "pass" if (identity_ok and push_ok and deploy_ok and cleanup_ok) else "fail"',
+            'verdict = "pass" if (identity_ok and push_ok and deploy_ok and cleanup_ok and local_ok) else "fail"',
             receipt,
         )
+        # Local push/read-back failure is a hard gate with its own reason;
+        # the receipt re-validates the digest shape itself.
+        self.assertIn('failure_reason = "local-push-failed" if not local_ok else "unknown-step-failure"', receipt)
+        self.assertIn('re.fullmatch(r"sha256:[0-9a-f]{64}", local_digest)', receipt)
+        # Contract object: status + repo_digests, digest null when invalid.
+        self.assertIn('"local_digest": local_digest if local_ok else None', receipt)
+        self.assertIn('"status": local_pull_status', receipt)
+        self.assertIn('"repo_digests": json.loads(read_file("canary-local-pull-digests") or "[]")', receipt)
 
     def test_failure_marker_is_emitted_and_job_fails(self):
         for step_name in ("Record runner identity and enforce engine contract",
                           "Build and push probe image to ACR",
+                          "Read back local registry digest",
                           "Pull, inspect and remove probe image on deploy host",
                           "Delete ACR tag and verify removal"):
             block = step_block(self.text, step_name)
