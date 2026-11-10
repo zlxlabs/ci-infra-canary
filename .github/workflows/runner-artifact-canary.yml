@@ -309,9 +309,11 @@ jobs:
           fi
           local_ref="$LOCAL_REGISTRY/$ACR_NAMESPACE/$IMAGE_NAME"
           ref="$local_ref:$GIT_SHA_TAG"
-          rc=0
           # Same ssh credentials/known_hosts as the ACR deploy leg above.
-          if ! remote_out="$(ssh -i "$HOME/.ssh/id_deploy" \
+          # Plain if/else (no `!`): inside else, $? is the ssh pipeline's real
+          # rc — with `if !` it would be the negated status, always 0.
+          rc=0
+          if remote_out="$(ssh -i "$HOME/.ssh/id_deploy" \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=20 \
             "$DEPLOY_SSH_USER@$DEPLOY_HOST" \
             "set -u
@@ -319,6 +321,8 @@ jobs:
              echo \"LOCAL-REPO-DIGESTS:\$(docker image inspect --format '{{json .RepoDigests}}' '$ref')\"
              docker rmi '$ref'
             ")"; then
+            :
+          else
             rc=$?
           fi
           digests="$(sed -n 's/^LOCAL-REPO-DIGESTS://p' <<<"$remote_out")"

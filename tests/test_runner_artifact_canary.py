@@ -158,7 +158,10 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
         # rc must be captured with an explicit if so the receipt can record
         # the outcome; continue-on-error would hide the status from it.
         self.assertNotIn("continue-on-error", local_pull)
-        self.assertIn("if ! remote_out=", local_pull)
+        # Plain if/else capture (no `!`): with `if ! cmd`, $? inside the else
+        # branch would be the negated status, not the ssh rc.
+        self.assertIn("if remote_out=", local_pull)
+        self.assertNotIn("if ! remote_out=", local_pull)
         self.assertIn("rc=$?", local_pull)
         # The step never fails the job: no failure marker, no exit 1, and an
         # unconditional exit 0 at the end.
