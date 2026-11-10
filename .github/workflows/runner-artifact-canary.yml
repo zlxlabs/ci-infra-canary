@@ -1,0 +1,408 @@
+# runner-artifact-canary — prove that a candidate runner slot's image survives
+# the real downstream boundary (ACR personal + deploy host n305), per
+# gate-hub#2227 card B. The gate-hub release pipeline (card C) dispatches this
+# workflow before batch-roll and validates the receipt artifact it uploads:
+# `runner-artifact-canary-receipt.v1.json` (schema runner-artifact-canary-receipt.v1).
+#
+# Non-goals: no local-registry leg (gate-hub#2225, separate card), no compose,
+# no container start, no service restart on the deploy host — pull/inspect/rmi only.
+name: runner-artifact-canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      roll_id:
+        description: "Release-roll correlation id; unique per roll, echoed in the receipt."
+        required: true
+        type: string
+      candidate:
+        description: "Full 40-hex commit SHA of the candidate gate-hub under test."
+        required: true
+        type: string
+      canary_label:
+        description: "Exact canary slot label for this roll: canary-<fingerprint>-<host>-ci."
+        required: true
+        type: string
+      templates_sha:
+        description: "Full 40-hex commit SHA of zlxlabs/ci-templates (fetches scripts/push_to_acr.sh from it)."
+        required: true
+        type: string
+      expected_runner_prefix:
+        description: "Expected runner.name prefix, e.g. gatehub-<candidate12>-slot-."
+        required: true
+        type: string
+      expected_engine:
+        description: "Expected DinD server version on the canary slot, e.g. 29.9.3 (exact match)."
+        required: true
+        type: string
+      ssh_user:
+        description: "SSH user on the deploy host (same shape as ci-templates build-deploy.yml's ssh_user)."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: runner-artifact-canary-${{ inputs.roll_id }}
+  cancel-in-progress: false
+
+jobs:
+  validate-inputs:
+    # Format gate before anything touches a runner or a registry: the canary job
+    # derives its runs-on label from the output below, so a malformed label must
+    # never reach scheduling.
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      canary_label: ${{ steps.validate.outputs.canary_label }}
+    steps:
+      - name: Validate dispatch inputs
+        id: validate
+        env:
+          ROLL_ID: ${{ inputs.roll_id }}
+          CANDIDATE: ${{ inputs.candidate }}
+          CANARY_LABEL: ${{ inputs.canary_label }}
+          TEMPLATES_SHA: ${{ inputs.templates_sha }}
+          EXPECTED_RUNNER_PREFIX: ${{ inputs.expected_runner_prefix }}
+          EXPECTED_ENGINE: ${{ inputs.expected_engine }}
+          SSH_USER: ${{ inputs.ssh_user }}
+        run: |
+          set -euo pipefail
+          # The label/prefix regexes are byte-for-byte the formats gate-hub
+          # generates: canary_window.py:60-67 (canary-<12hex>-<node>-ci) and the
+          # slot naming gatehub-<candidate12>-slot-<n>. The ssh_user shape is
+          # ci-templates build-deploy.yml's own ssh_user guard.
+          reject() {
+            echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=invalid-input-$1"
+            exit 1
+          }
+          [[ "$ROLL_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || reject roll_id
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]] || reject candidate
+          [[ "$CANARY_LABEL" =~ ^canary-[0-9a-f]{12}-[a-z0-9][a-z0-9-]*-ci$ ]] || reject canary_label
+          [[ "$TEMPLATES_SHA" =~ ^[0-9a-f]{40}$ ]] || reject templates_sha
+          [[ "$EXPECTED_RUNNER_PREFIX" =~ ^gatehub-[0-9a-f]{12}-slot-$ ]] || reject expected_runner_prefix
+          [[ "$EXPECTED_ENGINE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || reject expected_engine
+          [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || reject ssh_user
+          echo "canary_label=$CANARY_LABEL" >> "$GITHUB_OUTPUT"
+
+  canary:
+    needs: validate-inputs
+    # Routing invariant (gate-hub#2227 design, "路由"): canary slots register
+    # WITHOUT the ordinary lane label `ci` — runs-on must be exactly
+    # self-hosted + linux + this roll's canary_label, nothing else.
+    runs-on: [self-hosted, linux, "${{ needs.validate-inputs.outputs.canary_label }}"]
+    timeout-minutes: 12
+    env:
+      ACR_REGISTRY: crpi-0vsre5argteykh9m.cn-guangzhou.personal.cr.aliyuncs.com
+      ACR_NAMESPACE: zlx-personal
+      IMAGE_NAME: runner-artifact-canary
+      DEPLOY_HOST: 100.68.21.80
+      DEPLOY_SSH_USER: ${{ inputs.ssh_user }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Record runner identity and enforce engine contract
+        id: identity
+        env:
+          EXPECTED_RUNNER_PREFIX: ${{ inputs.expected_runner_prefix }}
+          EXPECTED_ENGINE: ${{ inputs.expected_engine }}
+          EXPECTED_CANARY_LABEL: ${{ needs.validate-inputs.outputs.canary_label }}
+          JOB_NAME: canary
+        run: |
+          set -euo pipefail
+          fail() {
+            printf '%s' "$1" > "$RUNNER_TEMP/canary-failure-reason"
+            echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=$1"
+            exit 1
+          }
+          case "$RUNNER_NAME" in
+            "$EXPECTED_RUNNER_PREFIX"*) ;;
+            *) fail runner-name-prefix-mismatch ;;
+          esac
+          server_version="$(docker version --format '{{.Server.Version}}')"
+          echo "docker_server_version=$server_version" >> "$GITHUB_OUTPUT"
+          [ "$server_version" = "$EXPECTED_ENGINE" ] || fail engine-version-mismatch
+          # Actual job labels from the GitHub jobs API, not the runs-on
+          # declaration (same evidence class as gate-hub receipt.py).
+          jobs_json="$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100")"
+          if ! parsed="$(printf '%s' "$jobs_json" | JOB_NAME="$JOB_NAME" EXPECTED_CANARY_LABEL="$EXPECTED_CANARY_LABEL" python3 -c '
+          import json, os, sys
+          jobs = json.load(sys.stdin)["jobs"]
+          mine = [j for j in jobs if j["name"] == os.environ["JOB_NAME"]]
+          if len(mine) != 1:
+              sys.exit(3)
+          job = mine[0]
+          if os.environ["EXPECTED_CANARY_LABEL"] not in job["labels"]:
+              sys.exit(4)
+          print("job_id=" + str(job["id"]))
+          print("job_labels=" + json.dumps(job["labels"]))
+          ')"; then
+            rc=$?
+            if [ "$rc" -eq 4 ]; then fail job-label-missing-canary-label; fi
+            fail job-lookup-failed
+          fi
+          printf '%s\n' "$parsed" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout ci-templates at pinned SHA
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: zlxlabs/ci-templates
+          # Full immutable SHA (never a movable ref): the probe verdict is only
+          # meaningful for the exact push_to_acr.sh under test.
+          ref: ${{ inputs.templates_sha }}
+          path: .ci-templates
+          persist-credentials: false
+
+      - name: Build and push probe image to ACR
+        id: push
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          ROLL_ID: ${{ inputs.roll_id }}
+        run: |
+          set -euo pipefail
+          fail() {
+            printf '%s' "$1" > "$RUNNER_TEMP/canary-failure-reason"
+            echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=$1"
+            exit 1
+          }
+          # Unique tag per run: since ci-templates#83 push_to_acr.sh reuses an
+          # existing tag instead of rebuilding, a fixed tag would make this
+          # canary pass green on a stale image.
+          git_sha_tag="$(printf '%s' "${ROLL_ID}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | tr -c 'A-Za-z0-9._-' '-')"
+          acr_image="$ACR_REGISTRY/$ACR_NAMESPACE/$IMAGE_NAME"
+          echo "git_sha_tag=$git_sha_tag" >> "$GITHUB_OUTPUT"
+          echo "acr_image=$acr_image" >> "$GITHUB_OUTPUT"
+          context="$(mktemp -d)"
+          trap 'rm -rf "$context"' EXIT
+          # Minimal context: FROM scratch + a few bytes, no external base image.
+          cat > "$context/Dockerfile" <<'EOF'
+          FROM scratch
+          ARG GIT_SHA
+          ENV GIT_SHA=${GIT_SHA}
+          COPY payload.txt /payload.txt
+          EOF
+          printf 'runner-artifact-canary probe payload\n' > "$context/payload.txt"
+          printf '%s' "$ACR_PASSWORD" | docker login \
+            "$ACR_REGISTRY" -u "$ACR_USERNAME" --password-stdin
+          # LOCAL_REGISTRY empty: the local-registry leg is gate-hub#2225, out of
+          # scope here. PUSH_MAX_ATTEMPTS=1 keeps one failing push from eating
+          # the whole timeout budget.
+          LOCAL_REGISTRY='' PUSH_MAX_ATTEMPTS=1 \
+            GIT_SHA="$git_sha_tag" BUILD_CONTEXT="$context" DOCKERFILE=Dockerfile \
+            bash .ci-templates/scripts/push_to_acr.sh
+
+      # Same tailscale + SSH wiring as ci-templates build-deploy.yml (pinned
+      # action, SSH_DEPLOY_KEY + KNOWN_HOSTS secrets). A fleet-local canary slot
+      # already reaches n305 via the host's tailnet NAT; the ephemeral node
+      # keeps this step identical for non-fleet slot shapes.
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@4e4c49acaa9818630ce0bd7a564372c17e33fb4d # v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Set up SSH
+        env:
+          SSH_DEPLOY_KEY: ${{ secrets.SSH_DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ secrets.KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_DEPLOY_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Pull, inspect and remove probe image on deploy host
+        id: deploy
+        env:
+          GIT_SHA_TAG: ${{ steps.push.outputs.git_sha_tag }}
+        run: |
+          set -euo pipefail
+          fail() {
+            printf '%s' "$1" > "$RUNNER_TEMP/canary-failure-reason"
+            echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=$1"
+            exit 1
+          }
+          acr_image="$ACR_REGISTRY/$ACR_NAMESPACE/$IMAGE_NAME"
+          ref="$acr_image:$GIT_SHA_TAG"
+          # Exactly three remote actions: pull / image inspect / rmi. The remote
+          # set -eu makes any of them (including rmi leftovers on n305) fail the
+          # job — no warning-and-continue.
+          if ! remote_out="$(ssh -i "$HOME/.ssh/id_deploy" \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=20 \
+            "$DEPLOY_SSH_USER@$DEPLOY_HOST" \
+            "set -eu
+             docker pull '$ref'
+             echo \"CANARY-IMAGE-ID:\$(docker image inspect --format '{{.Id}}' '$ref')\"
+             echo \"CANARY-REPO-DIGESTS:\$(docker image inspect --format '{{json .RepoDigests}}' '$ref')\"
+             docker rmi '$ref'
+            ")"; then
+            fail deploy-host-pull-inspect-rmi-failed
+          fi
+          image_id="$(sed -n 's/^CANARY-IMAGE-ID://p' <<<"$remote_out")"
+          repo_digests="$(sed -n 's/^CANARY-REPO-DIGESTS://p' <<<"$remote_out")"
+          [ -n "$image_id" ] || fail deploy-host-image-id-missing
+          [ -n "$repo_digests" ] || fail deploy-host-repo-digests-missing
+          # PASS requires the pulled image's RepoDigests to carry the ACR
+          # identity — proves the host pulled THIS registry's bytes.
+          printf '%s' "$repo_digests" | grep -q "\"$acr_image@sha256:" \
+            || fail deploy-host-acr-repo-digest-missing
+          echo "deploy_image_id=$image_id" >> "$GITHUB_OUTPUT"
+          echo "deploy_repo_digests=$repo_digests" >> "$GITHUB_OUTPUT"
+
+      - name: Delete ACR tag and verify removal
+        id: cleanup
+        # Success or failure, this run's tag must not outlive the probe.
+        if: always()
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          GIT_SHA_TAG: ${{ steps.push.outputs.git_sha_tag }}
+        run: |
+          set -euo pipefail
+          fail() {
+            printf '%s' 'failed' > "$RUNNER_TEMP/canary-cleanup-status"
+            printf '%s' "$1" > "$RUNNER_TEMP/canary-failure-reason"
+            echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=$1"
+            exit 1
+          }
+          set_status() { printf '%s' "$1" > "$RUNNER_TEMP/canary-cleanup-status"; }
+          if [ -z "$GIT_SHA_TAG" ]; then
+            # Failed before the push step: this run never created an ACR tag.
+            set_status skipped
+            exit 0
+          fi
+          # curl --config reads `-u user:pass` from stdin; quotes, backslashes
+          # or whitespace inside the secret would break that syntax silently,
+          # so verify the shape instead of hoping.
+          if ! printf '%s' "$ACR_USERNAME$ACR_PASSWORD" | python3 -c '
+          import re, sys
+          sys.exit(0 if re.fullmatch(r"[^\"\\\s]+", sys.stdin.read()) else 1)'; then
+            fail acr-secret-shape-unsafe
+          fi
+          repo="$ACR_NAMESPACE/$IMAGE_NAME"
+          service='registry.aliyuncs.com:cn-guangzhou:26842'
+          realm='https://dockerauth-cn-guangzhou.aliyuncs.com/auth'
+          accept='application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json'
+          # ACR personal has no tag-delete OpenAPI callable with the docker
+          # login credentials (they are account+fixed-password, not an AK);
+          # registry v2 DELETE only accepts a digest. Chain:
+          # GET manifest by tag -> Docker-Content-Digest header -> DELETE digest.
+          if ! token="$(printf 'user = "%s:%s"\n' "$ACR_USERNAME" "$ACR_PASSWORD" \
+            | curl -fsS --config - -H 'Accept: application/json' \
+              "$realm?service=$service&scope=repository:$repo:*" \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')"; then
+            fail cleanup-token-failed
+          fi
+          headers_file="$RUNNER_TEMP/canary-cleanup-headers.txt"
+          if ! get_code="$(curl -sS -o /dev/null -D "$headers_file" -w '%{http_code}' \
+            -H "Authorization: Bearer $token" -H "Accept: $accept" \
+            "https://$ACR_REGISTRY/v2/$repo/manifests/$GIT_SHA_TAG")"; then
+            get_code="curl-error"
+          fi
+          if [ "$get_code" = "200" ]; then
+            digest="$(tr -d '\r' < "$headers_file" | awk 'tolower($1)=="docker-content-digest:"{print $2}')"
+            [ -n "$digest" ] || fail cleanup-digest-lookup-failed
+            echo "$digest" > "$RUNNER_TEMP/canary-acr-digest"
+            if ! del_code="$(printf 'user = "%s:%s"\n' "$ACR_USERNAME" "$ACR_PASSWORD" \
+              | curl -sS --config - -o /dev/null -w '%{http_code}' \
+                -X DELETE -H "Authorization: Bearer $token" \
+                "https://$ACR_REGISTRY/v2/$repo/manifests/$digest")"; then
+              fail cleanup-delete-curl-failed
+            fi
+            [ "$del_code" = "202" ] || fail "cleanup-delete-http-$del_code"
+          elif [ "$get_code" = "404" ]; then
+            # Tag already absent (e.g. push failed before upload): nothing to
+            # delete, the invariant "tag does not exist" already holds.
+            :
+          else
+            fail "cleanup-tag-lookup-http-$get_code"
+          fi
+          # Read-back proof: the tag must be gone, verbatim "no such manifest".
+          inspect_out="$RUNNER_TEMP/canary-cleanup-inspect.txt"
+          if docker manifest inspect "$ACR_REGISTRY/$repo:$GIT_SHA_TAG" >"$inspect_out" 2>&1; then
+            fail cleanup-verify-tag-still-exists
+          fi
+          grep -q 'no such manifest' "$inspect_out" || fail cleanup-verify-inconclusive
+          set_status deleted
+
+      - name: Write receipt
+        id: receipt
+        if: always()
+        env:
+          ROLL_ID: ${{ inputs.roll_id }}
+          CANDIDATE: ${{ inputs.candidate }}
+          CANARY_LABEL: ${{ inputs.canary_label }}
+          TEMPLATES_SHA: ${{ inputs.templates_sha }}
+          ACR_REGISTRY_ENV: ${{ env.ACR_REGISTRY }}
+          ACR_NAMESPACE_ENV: ${{ env.ACR_NAMESPACE }}
+          IMAGE_NAME_ENV: ${{ env.IMAGE_NAME }}
+          DEPLOY_HOST_ENV: ${{ env.DEPLOY_HOST }}
+          IDENTITY_CONCLUSION: ${{ steps.identity.conclusion }}
+          PUSH_CONCLUSION: ${{ steps.push.conclusion }}
+          DEPLOY_CONCLUSION: ${{ steps.deploy.conclusion }}
+          CLEANUP_CONCLUSION: ${{ steps.cleanup.conclusion }}
+          DOCKER_SERVER_VERSION: ${{ steps.identity.outputs.docker_server_version }}
+          JOB_ID: ${{ steps.identity.outputs.job_id }}
+          JOB_LABELS: ${{ steps.identity.outputs.job_labels }}
+          ACR_IMAGE: ${{ steps.push.outputs.acr_image }}
+          DEPLOY_IMAGE_ID: ${{ steps.deploy.outputs.deploy_image_id }}
+          DEPLOY_REPO_DIGESTS: ${{ steps.deploy.outputs.deploy_repo_digests }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          temp = os.environ["RUNNER_TEMP"]
+
+          def read_file(name, default=""):
+              try:
+                  with open(os.path.join(temp, name), encoding="utf-8") as fh:
+                      return fh.read().strip()
+              except OSError:
+                  return default
+
+          identity_ok = os.environ["IDENTITY_CONCLUSION"] == "success"
+          push_ok = os.environ["PUSH_CONCLUSION"] == "success"
+          deploy_ok = os.environ["DEPLOY_CONCLUSION"] == "success"
+          cleanup_ok = os.environ["CLEANUP_CONCLUSION"] == "success"
+          verdict = "pass" if (identity_ok and push_ok and deploy_ok and cleanup_ok) else "fail"
+          cleanup_status = read_file("canary-cleanup-status", "unknown")
+          if verdict == "pass":
+              failure_reason = ""
+          else:
+              failure_reason = read_file("canary-failure-reason", "unknown-step-failure")
+          receipt = {
+              "schema": "runner-artifact-canary-receipt.v1",
+              "roll_id": os.environ["ROLL_ID"],
+              "candidate": os.environ["CANDIDATE"],
+              "canary_label": os.environ["CANARY_LABEL"],
+              "runner_name": os.environ.get("RUNNER_NAME", ""),
+              "job_id": os.environ["JOB_ID"],
+              "job_labels": json.loads(os.environ.get("JOB_LABELS") or "[]"),
+              "templates_sha": os.environ["TEMPLATES_SHA"],
+              "docker_server_version": os.environ["DOCKER_SERVER_VERSION"],
+              "acr_ref": os.environ["ACR_IMAGE"],
+              "acr_digest": read_file("canary-acr-digest"),
+              "deploy_host": os.environ["DEPLOY_HOST_ENV"],
+              "deploy_image_id": os.environ["DEPLOY_IMAGE_ID"],
+              "deploy_repo_digests": json.loads(os.environ.get("DEPLOY_REPO_DIGESTS") or "[]"),
+              "cleanup": cleanup_status,
+              "verdict": verdict,
+              "failure_reason": failure_reason,
+          }
+          with open(os.path.join(temp, "runner-artifact-canary-receipt.v1.json"), "w", encoding="utf-8") as fh:
+              json.dump(receipt, fh, indent=2, sort_keys=True)
+              fh.write("\n")
+          PY
+
+      - name: Upload receipt artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-artifact-canary-receipt
+          path: ${{ runner.temp }}/runner-artifact-canary-receipt.v1.json
+          if-no-files-found: error

@@ -47,6 +47,46 @@ receipt 标签按类带后缀：`ci_label` 为空或恰等于 `canary-<fingerpri
 拒绝。标签由 gate-hub 分别经 `extra_runner_label_ci` / `extra_runner_label_review`
 透传，确保 quality/review 各自落到同类 canary 槽。
 
+## runner-artifact-canary（gate-hub#2227 卡 B）
+
+`runner-artifact-canary.yml` 证明「候选 runner 槽产出的镜像能被真实下游接受」：
+在候选 canary 槽上用固定 SHA 的 `zlxlabs/ci-templates/scripts/push_to_acr.sh`
+构建并推送一个 `FROM scratch` 最小镜像到 ACR，再从部署主机 n305（100.68.21.80）
+SSH 执行且仅执行 pull / image inspect / rmi。gate-hub 发布流水线（卡 C）在
+batch-roll 之前 dispatch 本 workflow 并校验回执。
+
+- **触发与输入**：仅 `workflow_dispatch`，七个必填输入（`roll_id`、`candidate`、
+  `canary_label`、`templates_sha`、`expected_runner_prefix`、`expected_engine`、
+  `ssh_user`），hosted 校验 job 用正则逐个验格式（`ssh_user` 形状与
+  ci-templates build-deploy.yml 的守卫一致），不合法即输出
+  `RUNNER-ARTIFACT-CANARY-FAIL reason=invalid-input-*` 并使 job 失败。两个 job
+  超时合计 14 分钟（workflow 上限 15 分钟）。
+- **路由**：canary job `runs-on` 精确为 `[self-hosted, linux, <canary_label>]`，
+  不带普通 lane label `ci`（canary 槽注册时已去掉该 label）。实际 job labels
+  由 identity 步骤从 GitHub jobs API 读回并断言含精确 canary label；`runner.name`
+  必须以 `expected_runner_prefix` 开头，DinD server 版本必须精确等于
+  `expected_engine`。
+- **镜像 tag**：`<roll_id>-<run_id>-<run_attempt>` 经合法化后作为唯一 tag——
+  ci-templates#83 起 `push_to_acr.sh` 遇已存在 tag 会复用旧镜像，固定 tag 会假绿。
+- **清理**：无论成败（`if: always()`）删除本轮 ACR tag。ACR 个人版 registry v2
+  不接受按 tag 删（返回 `DIGEST_INVALID`），链路是 GET manifest by tag 取
+  `Docker-Content-Digest` → `DELETE /v2/<name>/manifests/<digest>`（202）→
+  `docker manifest inspect` 读回必须命中 `no such manifest`。token dance 凭据
+  经 `curl --config -`（stdin）传递，不进 argv；secret 含引号/反斜杠/空白时
+  fail-loud（`acr-secret-shape-unsafe`）。
+- **回执**：上传 artifact `runner-artifact-canary-receipt`，文件
+  `runner-artifact-canary-receipt.v1.json`（schema 同名字符串），字段：`schema`、
+  `roll_id`、`candidate`、`canary_label`、`runner_name`、`job_id`、`job_labels`、
+  `templates_sha`、`docker_server_version`、`acr_ref`、`acr_digest`、`deploy_host`、
+  `deploy_image_id`、`deploy_repo_digests`、`cleanup`（`deleted`/`failed`/
+  `skipped`）、`verdict`（`pass`/`fail`）、`failure_reason`。校验、推送、拉取或
+  清理任一失败时 job 红、回执 `verdict=fail`；`skipped` 仅出现在 push 步骤之前
+  就失败（本轮从未在 ACR 产生 tag）。hosted 校验 job 失败时 canary job 不运行，
+  **无回执 artifact**——卡 C 按「run 红 + 无 artifact」处理。
+- **secret 依赖**：`ACR_USERNAME`、`ACR_PASSWORD`、`SSH_DEPLOY_KEY`、
+  `KNOWN_HOSTS`、`TS_AUTHKEY`（复用现有五个，不新增凭据名）。本地 registry 一环
+  未包含（gate-hub#2225 另出小卡）。契约测试：`tests/test_runner_artifact_canary.py`。
+
 ## 本地验证
 
 ```bash
