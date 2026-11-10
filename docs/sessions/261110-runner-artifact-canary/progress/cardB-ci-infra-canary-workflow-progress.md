@@ -13,3 +13,10 @@
 - **本段结论**：`.github/workflows/runner-artifact-canary.yml`（hosted 校验 job + canary job 共 8 步）、`tests/test_runner_artifact_canary.py`（14 个契约测试）、README 说明节全部完成。cleanup 与 receipt 两段脚本已从 workflow 原样提取到本地真实环境端到端实跑：cleanup 对真实 ACR tag 完成 token dance→digest→DELETE 202→读回 `no such manifest`（status=deleted）；receipt 生成 pass/fail 两份合法 JSON fixture（供卡 C 用）。
 - **关键决策与已否决方案**：Verify-Command `make test` 在基线上不存在（基线目标为 `unit`），已走范围申请（seq=1）被拒，主脑确认按 `make unit` 执行，不改 Makefile。hosted 校验 job 失败时 canary job skip、无回执 artifact，卡 C 按「run 红+无 artifact」判定——这是有意契约，因为 candidate/label 未过校验时回执字段不可信。receipt 步骤 `if: always()`：即使 checkout/tailscale 等第三方步骤失败也产出 verdict=fail 回执。清理链路用 GET by tag 的 `Docker-Content-Digest` header 而非 `docker manifest inspect -v` 的 JSON 结构（后者对单 manifest/index 形状不稳定）。
 - **下一步唯一动作**：scope check、提交、开 PR、写报告。
+
+## 段 3（2026-11-10 推送与 PR 完成）
+
+- **当前阶段**：完成——PR 已开。
+- **本段结论**：首推被 pre-push public-scan 拦截（workflow 第 95 行的部署 SSH 用户名裸词命中个人身份规则）。按卡面「SSH 用户沿用 build-deploy 的默认值**或现有输入**」的第二条授权路线改造：`ssh_user` 成为第 7 个必填 dispatch 输入（形状校验同 build-deploy 的守卫），public 仓不再出现硬编码用户名；卡 C dispatch 时显式传该字段。重推成功，PR #73 已开（Refs gate-hub#2227、ci-templates#81）。
+- **关键决策与已否决方案**：否决把用户名拆写/编码绕过扫描（禁转义纪律）；否决给扫描器加豁免（无行级豁免机制且不该为单卡改全局守卫）；扫描器对 `zlxlabs`/`zlx-personal` 不命中（lookaround），无需处理。
+- **下一步唯一动作**：写 delegate 报告。
