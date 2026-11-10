@@ -195,15 +195,11 @@ jobs:
             GIT_SHA="$git_sha_tag" BUILD_CONTEXT="$context" DOCKERFILE=Dockerfile \
             bash .ci-templates/scripts/push_to_acr.sh
 
-      # Same tailscale + SSH wiring as ci-templates build-deploy.yml (pinned
-      # action, SSH_DEPLOY_KEY + KNOWN_HOSTS secrets). A fleet-local canary slot
-      # already reaches n305 via the host's tailnet NAT; the ephemeral node
-      # keeps this step identical for non-fleet slot shapes.
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@4e4c49acaa9818630ce0bd7a564372c17e33fb4d # v2
-        with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-
+      # No tailscale step: the canary job only ever runs on self-hosted canary
+      # slots whose host is itself in the tailnet, so it reaches n305
+      # (100.68.21.80) directly through the host's NAT — same wiring as
+      # build-deploy.yml's self mode (its hosted-only tailscale branch does not
+      # apply here).
       - name: Set up SSH
         env:
           SSH_DEPLOY_KEY: ${{ secrets.SSH_DEPLOY_KEY }}

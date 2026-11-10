@@ -20,3 +20,10 @@
 - **本段结论**：首推被 pre-push public-scan 拦截（workflow 第 95 行的部署 SSH 用户名裸词命中个人身份规则）。按卡面「SSH 用户沿用 build-deploy 的默认值**或现有输入**」的第二条授权路线改造：`ssh_user` 成为第 7 个必填 dispatch 输入（形状校验同 build-deploy 的守卫），public 仓不再出现硬编码用户名；卡 C dispatch 时显式传该字段。重推成功，PR #73 已开（Refs gate-hub#2227、ci-templates#81）。
 - **关键决策与已否决方案**：否决把用户名拆写/编码绕过扫描（禁转义纪律）；否决给扫描器加豁免（无行级豁免机制且不该为单卡改全局守卫）；扫描器对 `zlxlabs`/`zlx-personal` 不命中（lookaround），无需处理。
 - **下一步唯一动作**：写 delegate 报告。
+
+## 段 4（2026-11-10 验收反馈第 1 轮修复）
+
+- **当前阶段**：review-fix——处理主脑第 1 轮验收 finding。
+- **本段结论**：删除 `Connect to Tailscale` 步骤与 `TS_AUTHKEY` 依赖（canary job 只跑 self-hosted 槽，宿主机本身在 tailnet 内直连 n305，与 build-deploy.yml 的 self 模式相同；无条件 tailscale 在 DinD 槽大概率失败且每轮多挂临时节点）。新增测试 `test_no_tailscale_step_or_ts_authkey` 锁定不存在性；secret 白名单收缩为 4 个；README 同步。47 测全绿。
+- **关键决策与已否决方案**：无（finding 修复路线唯一，无分歧）。
+- **下一步唯一动作**：推送并更新报告。

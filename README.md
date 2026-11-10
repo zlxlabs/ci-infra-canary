@@ -84,8 +84,10 @@ batch-roll 之前 dispatch 本 workflow 并校验回执。
   就失败（本轮从未在 ACR 产生 tag）。hosted 校验 job 失败时 canary job 不运行，
   **无回执 artifact**——卡 C 按「run 红 + 无 artifact」处理。
 - **secret 依赖**：`ACR_USERNAME`、`ACR_PASSWORD`、`SSH_DEPLOY_KEY`、
-  `KNOWN_HOSTS`、`TS_AUTHKEY`（复用现有五个，不新增凭据名）。本地 registry 一环
-  未包含（gate-hub#2225 另出小卡）。契约测试：`tests/test_runner_artifact_canary.py`。
+  `KNOWN_HOSTS`（复用现有四个，不新增凭据名；self-hosted canary 槽经宿主机
+  tailnet 直连 n305，与 build-deploy.yml 的 self 模式相同，不需要 TS_AUTHKEY）。
+  本地 registry 一环未包含（gate-hub#2225 另出小卡）。契约测试：
+  `tests/test_runner_artifact_canary.py`。
 
 ## 本地验证
 

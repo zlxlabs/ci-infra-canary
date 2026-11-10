@@ -182,14 +182,22 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
 
     def test_all_actions_pinned_to_full_commit_sha(self):
         uses = re.findall(r"^\s+uses: (\S+)", self.text, re.MULTILINE)
-        self.assertGreaterEqual(len(uses), 3)
+        self.assertGreaterEqual(len(uses), 2)
         for use in uses:
             self.assertRegex(use, r"^[^@]+@[0-9a-f]{40}$", use)
+
+    def test_no_tailscale_step_or_ts_authkey(self):
+        # The canary job only runs on self-hosted canary slots (hosts already in
+        # the tailnet, build-deploy.yml self-mode wiring); a tailscale step
+        # would dangle an extra ephemeral node per run and cannot succeed in the
+        # DinD slot shape. Its absence and the secret non-dependency are locked.
+        self.assertNotIn("tailscale/github-action", self.text)
+        self.assertNotIn("TS_AUTHKEY", self.text)
 
     def test_only_shared_secrets_are_used(self):
         used = sorted(set(re.findall(r"secrets\.([A-Z_]+)", self.text)))
         self.assertEqual(used, ["ACR_PASSWORD", "ACR_USERNAME", "KNOWN_HOSTS",
-                                "SSH_DEPLOY_KEY", "TS_AUTHKEY"])
+                                "SSH_DEPLOY_KEY"])
 
 
 if __name__ == "__main__":
