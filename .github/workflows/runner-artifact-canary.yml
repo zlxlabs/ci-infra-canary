@@ -203,9 +203,19 @@ jobs:
           # this is the business repos' real dual-push path, not a parallel
           # docker push. PUSH_MAX_ATTEMPTS=1 keeps one failing push from eating
           # the whole timeout budget.
-          PUSH_MAX_ATTEMPTS=1 \
+          # Plain if/else (no `!`): capture the script rc so set -e cannot
+          # exit before fail writes canary-failure-reason=acr-push-failed.
+          push_rc=0
+          if PUSH_MAX_ATTEMPTS=1 \
             GIT_SHA="$git_sha_tag" BUILD_CONTEXT="$context" DOCKERFILE=Dockerfile \
-            bash .ci-templates/scripts/push_to_acr.sh
+            bash .ci-templates/scripts/push_to_acr.sh; then
+            :
+          else
+            push_rc=$?
+          fi
+          if [ "$push_rc" -ne 0 ]; then
+            fail acr-push-failed
+          fi
 
       - name: Read back local registry digest
         id: local-digest
