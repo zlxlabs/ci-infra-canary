@@ -130,6 +130,22 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
         self.assertIn("FROM scratch", push)
         self.assertIn("password-stdin", push)
 
+    def test_push_script_failure_records_acr_push_failed(self):
+        push = step_block(self.text, "Build and push probe image to ACR")
+        # Capture push_to_acr.sh rc with plain if/else so set -e cannot
+        # exit before the fail helper writes canary-failure-reason.
+        # `if ! cmd` would make $? inside else the negated status (always 0).
+        self.assertIn("if PUSH_MAX_ATTEMPTS=1", push)
+        self.assertIn("push_rc=$?", push)
+        self.assertNotIn("if ! PUSH_MAX_ATTEMPTS", push)
+        self.assertIn('[ "$push_rc" -ne 0 ]', push)
+        self.assertIn("fail acr-push-failed", push)
+        self.assertIn(
+            'printf \'%s\' "$1" > "$RUNNER_TEMP/canary-failure-reason"',
+            push,
+        )
+        self.assertIn("exit 1", push)
+
     def test_local_registry_job_env_constant_and_inherited_by_push_script(self):
         env_block = job_block(self.text, "canary")
         env_block = env_block[:env_block.index("    steps:")]
