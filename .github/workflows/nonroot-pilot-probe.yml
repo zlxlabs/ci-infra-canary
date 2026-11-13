@@ -1,0 +1,394 @@
+# nonroot-pilot-probe — gate-hub#2384 card C phase 1: prove the non-root
+# pilot slot (SLOT_JOB_USER=1000:1000, gate-hub#2391) item by item against the
+# design verification matrix (gate-hub
+# docs/sessions/261113-runner-nonroot/design.md §5.2), without exposing real
+# traffic: every pilot job's runs-on is EXACTLY
+# [self-hosted, linux, <canary_label>] — no `ci` label — so only the slot the
+# operator activated with a canary label can pick these jobs up.
+#
+# Manual dispatch only (design §7 card C: the operator activates the pilot
+# slot, then dispatches this workflow). expected_uid=1000 is the pilot run;
+# expected_uid=0 is the post-rollback root drill (P12): the same matrix re-run
+# under root semantics (P4 expects the write to succeed, P1 asserts uid 0).
+#
+# Host-side actions of the matrix (P2 reverse kill-the-proxy, P10 cache-gc,
+# P12 re-activation) are operator work and deliberately not in this file.
+# P3 (real gate quality) is NOT here: gate-v2@v2 quality is not runnable under
+# workflow_dispatch — its hard `PR size preflight` step (gate-v2.yml:706-714)
+# consumes github.event.pull_request.base/head.sha, which are empty on
+# dispatch, and pr-size-preflight/preflight.py:53-58 then fails on the empty
+# SHAs (gate#408 / v2 tag 4dc79fe). Judgment recorded in the dispatch report;
+# the gate repo was not modified per card instructions.
+#
+# Every probe item ends with one grep-able verdict line:
+#   NONROOT-PROBE-V1 item=<Pn> status=<pass|fail|info> <key=value...>
+# A failing item prints its fail line and exits non-zero. P11 is observational
+# (status=info) and never fails the run.
+name: nonroot-pilot-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      canary_label:
+        description: "Pilot slot canary label (canary-<12hex>-<name>), byte-for-byte the gate-hub launcher format (run-ephemeral-runner.sh:1993)."
+        required: true
+        type: string
+      expected_uid:
+        description: "Job uid semantics: 1000 = non-root pilot slot; 0 = post-rollback root drill (P12)."
+        required: false
+        type: choice
+        default: "1000"
+        options:
+          - "1000"
+          - "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nonroot-pilot-probe-${{ inputs.canary_label }}
+  cancel-in-progress: false
+
+jobs:
+  validate-inputs:
+    # Reject a malformed label before it reaches scheduling: the pilot jobs
+    # derive their runs-on from the output below (same shape as
+    # runner-artifact-canary.yml's validate-inputs).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      canary_label: ${{ steps.validate.outputs.canary_label }}
+      expected_uid: ${{ steps.validate.outputs.expected_uid }}
+    steps:
+      - name: Validate dispatch inputs
+        id: validate
+        env:
+          CANARY_LABEL: ${{ inputs.canary_label }}
+          EXPECTED_UID: ${{ inputs.expected_uid }}
+        run: |
+          set -euo pipefail
+          reject() {
+            echo "::error::NONROOT-PROBE-FAIL reason=invalid-input-$1"
+            exit 1
+          }
+          # Byte-for-byte the gate-hub launcher's canary label regex
+          # (runner/run-ephemeral-runner.sh:1993). Tests pin this equality.
+          [[ "$CANARY_LABEL" =~ ^canary-[0-9a-f]{12}-[a-z0-9][a-z0-9-]*$ ]] || reject canary_label
+          case "$EXPECTED_UID" in
+            1000|0) ;;
+            *) reject expected_uid ;;
+          esac
+          echo "canary_label=$CANARY_LABEL" >> "$GITHUB_OUTPUT"
+          echo "expected_uid=$EXPECTED_UID" >> "$GITHUB_OUTPUT"
+
+  pilot-probe:
+    needs: validate-inputs
+    # Routing invariant (design §5.2 phase 1): the pilot slot registers ONLY
+    # its canary label, so this runs-on must not carry the lane label `ci`.
+    runs-on: [self-hosted, linux, "${{ needs.validate-inputs.outputs.canary_label }}"]
+    timeout-minutes: 20
+    env:
+      EXPECTED_UID: ${{ needs.validate-inputs.outputs.expected_uid }}
+    steps:
+      - name: P1 identity audit
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "NONROOT-PROBE-V1 item=P1 status=fail $1"
+            exit 1
+          }
+          uid="$(id -u)"
+          home_dir="${HOME:-}"
+          xdg_cache="${XDG_CACHE_HOME:-unset}"
+          gradle_user_home="${GRADLE_USER_HOME:-unset}"
+          proxy_set=0
+          [ -n "${GATE_HUB_SOURCE_PROXY_SOCK:-}" ] && proxy_set=1
+          if [ "$EXPECTED_UID" = "1000" ]; then
+            sudo_forbidden=1
+            if sudo -n true >/dev/null 2>&1; then
+              fail "reason=sudo-succeeded uid=$uid"
+            fi
+          else
+            sudo_forbidden=0
+          fi
+          if [ "$uid" != "$EXPECTED_UID" ]; then
+            fail "reason=uid-mismatch uid=$uid expected=$EXPECTED_UID"
+          fi
+          if [ "$EXPECTED_UID" = "1000" ]; then
+            # Design §4.1: the launcher injects HOME for the pilot slot; the
+            # ground truth is the passwd entry of uid 1000, not a literal.
+            uid1000_home="$(getent passwd 1000 | cut -d: -f6)"
+            [ -n "$uid1000_home" ] || fail "reason=uid1000-passwd-missing"
+            [ "$home_dir" = "$uid1000_home" ] || fail "reason=home-mismatch home=$home_dir expected=$uid1000_home"
+          fi
+          echo "NONROOT-PROBE-V1 item=P1 status=pass uid=$uid expected_uid=$EXPECTED_UID home=$home_dir sudo_forbidden=$sudo_forbidden xdg_cache_home=$xdg_cache gradle_user_home=$gradle_user_home source_proxy_set=$proxy_set id=\"$(id)\""
+
+      - name: Checkout probe fixtures
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: P2 source prepare via job-side client
+        env:
+          PROBE_REPOSITORY: ${{ github.repository }}
+          PROBE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "NONROOT-PROBE-V1 item=P2 status=fail $1"
+            exit 1
+          }
+          # Same client path the gate-hub docs declare for job-side consumers
+          # (docs/designs/git-mirror-consumption.md: job-side client
+          # /opt/gate-hub-cache/git/git-source-prepare) and the same argv shape
+          # gate-v2 quality uses (gate-v2.yml@v2 GATE_SOURCE_PREPARE_SCRIPT:
+          # --repository / --commit / --deadline-epoch, stderr judged).
+          client=/opt/gate-hub-cache/git/git-source-prepare
+          [ -x "$client" ] || fail "reason=client-missing client=$client"
+          deadline=$(( $(date +%s) + 180 ))
+          client_raw=$("$client" --repository "$PROBE_REPOSITORY" --commit "$PROBE_COMMIT" --deadline-epoch "$deadline" 2>&1 >/dev/null) && client_status=0 || client_status=$?
+          protocol_lines="$(printf '%s\n' "$client_raw" | grep -c '^GIT-SOURCE-PREPARE-V1 ' || true)"
+          proxy_set=0
+          [ -n "${GATE_HUB_SOURCE_PROXY_SOCK:-}" ] && proxy_set=1
+          if [ "$client_status" -ne 0 ] || [ "$protocol_lines" != "1" ]; then
+            fail "reason=client-failed exit=$client_status protocol_lines=$protocol_lines proxy_set=$proxy_set reply=${client_raw:0:512}"
+          fi
+          printf '%s\n' "$client_raw" | grep '^GIT-SOURCE-PREPARE-V1 '
+          echo "NONROOT-PROBE-V1 item=P2 status=pass repository=$PROBE_REPOSITORY commit=$PROBE_COMMIT proxy_set=$proxy_set exit=0"
+
+      - name: P4 DAC permission denial (uid-agnostic semantics)
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "NONROOT-PROBE-V1 item=P4 status=fail $1"
+            exit 1
+          }
+          probe_dir="$(mktemp -d)"
+          chmod 0555 "$probe_dir"
+          write_result="$(python3 - "$probe_dir" <<'PY'
+          import errno, os, sys
+          try:
+              with open(os.path.join(sys.argv[1], "probe-write"), "w") as fh:
+                  fh.write("x")
+              print("wrote=1 errno_name=none")
+          except OSError as exc:
+              print("wrote=0 errno_name=%s errno=%d" % (errno.errorcode.get(exc.errno, "unknown"), exc.errno))
+          PY
+          )"
+          chmod 0755 "$probe_dir"
+          rm -rf "$probe_dir"
+          case "$write_result" in
+            "wrote=1 errno_name=none") wrote=1; errno_name=none ;;
+            wrote=0*) wrote=0; errno_name="$(grep -o 'errno_name=[^ ]*' <<<"$write_result" | cut -d= -f2)" ;;
+            *) fail "reason=probe-script-failed result=$write_result" ;;
+          esac
+          if [ "$EXPECTED_UID" = "1000" ]; then
+            # Design §1.3 / gate-hub#2384: under a non-root job a write into a
+            # 0555 directory MUST fail with EACCES — the root bypass that made
+            # caller permission tests false-red is gone.
+            [ "$wrote" = "0" ] || fail "reason=write-should-fail result=$write_result"
+            [ "$errno_name" = "EACCES" ] || fail "reason=errno-not-eacces result=$write_result"
+          else
+            # Root drill (P12): root bypasses DAC, the write must succeed.
+            [ "$wrote" = "1" ] || fail "reason=root-write-should-succeed result=$write_result"
+          fi
+          echo "NONROOT-PROBE-V1 item=P4 status=pass expected_uid=$EXPECTED_UID wrote=$wrote errno_name=$errno_name"
+
+      - name: P5 DinD build and run
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "NONROOT-PROBE-V1 item=P5 status=fail $1"
+            exit 1
+          }
+          docker info >/dev/null 2>&1 || fail "reason=docker-info-failed"
+          server_version="$(docker version --format '{{.Server.Version}}')"
+          [ -n "$server_version" ] || fail "reason=server-version-empty"
+          ctx="$(mktemp -d)"
+          trap 'rm -rf "$ctx"' EXIT
+          printf 'FROM busybox:1.37.0\nRUN echo nonroot-probe-dind-ok > /probe-marker && cat /probe-marker\n' > "$ctx/Dockerfile"
+          if ! docker build -t nonroot-pilot-probe:p5 "$ctx" > "$RUNNER_TEMP/p5-build.log" 2>&1; then
+            tail -n 20 "$RUNNER_TEMP/p5-build.log"
+            fail "reason=docker-build-failed server_version=$server_version"
+          fi
+          if ! run_output="$(docker run --rm nonroot-pilot-probe:p5)"; then
+            fail "reason=docker-run-failed server_version=$server_version"
+          fi
+          if docker rmi nonroot-pilot-probe:p5 >/dev/null 2>&1; then
+            cleanup=ok
+          else
+            cleanup=leftover
+          fi
+          [ "$run_output" = "nonroot-probe-dind-ok" ] || fail "reason=run-output-mismatch output=$run_output"
+          echo "NONROOT-PROBE-V1 item=P5 status=pass server_version=$server_version image=busybox:1.37.0 run_output=$run_output cleanup=$cleanup"
+
+      - name: P6 install jq via mise
+        id: mise-install
+        uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          tools: jq@1.7.1
+
+      - name: P6 verify mise install location
+        if: always()
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "NONROOT-PROBE-V1 item=P6 status=fail $1"
+            exit 1
+          }
+          [ "${{ steps.mise-install.outcome }}" = "success" ] || fail "reason=mise-action-failed outcome=${{ steps.mise-install.outcome }}"
+          command -v jq >/dev/null 2>&1 || fail "reason=jq-not-on-path"
+          jq_version="$(jq --version)"
+          jq_path="$(mise where jq)"
+          case "$jq_path" in
+            "$HOME/.local/share/mise"/*) ;;
+            *) fail "reason=mise-path-outside-home path=$jq_path home=$HOME" ;;
+          esac
+          echo "NONROOT-PROBE-V1 item=P6 status=pass tool=jq version=$jq_version path=$jq_path"
+
+      - name: P7 gradle wrapper downloads dist into GRADLE_USER_HOME
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "NONROOT-PROBE-V1 item=P7 status=fail $1"
+            exit 1
+          }
+          command -v java >/dev/null 2>&1 || fail "reason=java-missing"
+          gradle_user_home="${GRADLE_USER_HOME:-$HOME/.gradle}"
+          export GRADLE_USER_HOME
+          cd probe/nonroot/gradle
+          ./gradlew --version > "$RUNNER_TEMP/p7-gradle-version.txt" 2>&1 || fail "reason=gradlew-failed gradle_user_home=$gradle_user_home"
+          dists_dir="$gradle_user_home/wrapper/dists/gradle-8.10.2-bin"
+          [ -d "$dists_dir" ] || fail "reason=dist-dir-missing dists=$dists_dir"
+          gradle_version="$(grep -m1 '^Gradle ' "$RUNNER_TEMP/p7-gradle-version.txt" | awk '{print $2}')"
+          echo "NONROOT-PROBE-V1 item=P7 status=pass gradle=$gradle_version gradle_user_home=$gradle_user_home dists=$dists_dir"
+
+      - name: P8 record baked node 22 toolcache state
+        run: |
+          set -euo pipefail
+          tc="${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}/node"
+          # Baked version of the runner image (gate-hub runner/Dockerfile
+          # toolcache self-check): setup-node must HIT this directory without
+          # re-downloading, proven by an unchanged directory mtime.
+          baked="$tc/22.23.3"
+          if [ -d "$baked" ]; then
+            echo "P8_BAKED_MTIME=$(stat -c %Y "$baked")" >> "$GITHUB_ENV"
+          else
+            echo "P8_BAKED_MTIME=absent" >> "$GITHUB_ENV"
+          fi
+          echo "P8_TOOLCACHE_ROOT=$tc" >> "$GITHUB_ENV"
+
+      - name: P8 install non-baked node 20 into toolcache
+        id: node20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.19.4
+
+      - name: P8 install baked node 22
+        id: node22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.23.3
+
+      - name: P8 verify toolcache writes and baked hit
+        if: always()
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "NONROOT-PROBE-V1 item=P8 status=fail $1"
+            exit 1
+          }
+          [ "${{ steps.node20.outcome }}" = "success" ] || fail "reason=setup-node20-failed outcome=${{ steps.node20.outcome }}"
+          [ "${{ steps.node22.outcome }}" = "success" ] || fail "reason=setup-node22-failed outcome=${{ steps.node22.outcome }}"
+          tc="$P8_TOOLCACHE_ROOT"
+          node20_dir=""
+          for d in "$tc"/20.19.4*/x64; do
+            if [ -d "$d" ]; then node20_dir="$d"; break; fi
+          done
+          [ -n "$node20_dir" ] || fail "reason=node20-toolcache-dir-missing tc=$tc"
+          node20_version="$("$node20_dir/bin/node" --version)"
+          [ "$node20_version" = "v20.19.4" ] || fail "reason=node20-version-mismatch version=$node20_version"
+          baked_after=""
+          [ -d "$tc/22.23.3" ] && baked_after="$(stat -c %Y "$tc/22.23.3")"
+          if [ "$P8_BAKED_MTIME" != "absent" ] && [ -n "$baked_after" ] && [ "$baked_after" = "$P8_BAKED_MTIME" ]; then
+            baked_hit=1
+          else
+            baked_hit=0
+          fi
+          node22_version="$(node --version)"
+          case "$node22_version" in
+            v22.*) ;;
+            *) fail "reason=node22-not-active version=$node22_version" ;;
+          esac
+          [ "$baked_hit" = "1" ] || fail "reason=baked-node22-not-hit baked_mtime_before=$P8_BAKED_MTIME after=$baked_after node22_version=$node22_version"
+          echo "NONROOT-PROBE-V1 item=P8 status=pass node20=$node20_version node22=$node22_version baked_hit=$baked_hit toolcache=$tc"
+
+      - name: P9 write small packages into uv and npm caches
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "NONROOT-PROBE-V1 item=P9 status=fail $1"
+            exit 1
+          }
+          uv_cache="$(uv cache dir)"
+          venv="$RUNNER_TEMP/p9-uv-venv"
+          uv venv --quiet "$venv" || fail "reason=uv-venv-failed"
+          uv pip install --quiet --python "$venv/bin/python" six || fail "reason=uv-install-failed uv_cache=$uv_cache"
+          # Offline reinstall proves the package really sits in the cache.
+          rm -rf "$venv"
+          uv venv --quiet "$venv" || fail "reason=uv-venv2-failed"
+          uv pip install --quiet --offline --python "$venv/bin/python" six || fail "reason=uv-offline-miss uv_cache=$uv_cache"
+          npm_cache="$(npm config get cache)"
+          pack_dir="$RUNNER_TEMP/p9-npm"
+          mkdir -p "$pack_dir"
+          npm pack is-odd@3.0.1 --pack-destination "$pack_dir" >/dev/null || fail "reason=npm-pack-failed"
+          npm cache add "$pack_dir/is-odd-3.0.1.tgz" >/dev/null || fail "reason=npm-cache-add-failed npm_cache=$npm_cache"
+          [ -n "$(find "$npm_cache/_cacache" -type f -print -quit 2>/dev/null)" ] || fail "reason=npm-cacache-empty npm_cache=$npm_cache"
+          echo "NONROOT-PROBE-V1 item=P9 status=pass uv_cache=$uv_cache uv_offline_install=ok npm_cache=$npm_cache"
+
+      - name: P11 unprivileged user namespace (observational)
+        run: |
+          set -euo pipefail
+          # V1 of the design (§9): whether uid 1000 + systempaths=unconfined
+          # still allows unshare --user --pid --mount-proc is a kernel-policy
+          # question the pilot must answer, not enforce. Never fails the run.
+          rc=0
+          unshare_err="$(mktemp)"
+          unshare --user --pid --mount-proc true 2>"$unshare_err" || rc=$?
+          rm -f "$unshare_err"
+          echo "NONROOT-PROBE-V1 item=P11 status=info exit_code=$rc expected_uid=$EXPECTED_UID"
+
+  cache-hit-check:
+    needs: [validate-inputs, pilot-probe]
+    # P7/P9 cross-job hit (design §5.2): the per-slot host binds persist
+    # across jobs, so a second job on the same slot must find the Gradle dist
+    # and the uv/npm caches the first job wrote.
+    runs-on: [self-hosted, linux, "${{ needs.validate-inputs.outputs.canary_label }}"]
+    timeout-minutes: 10
+    steps:
+      - name: P7/P9 cross-job cache hit
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "NONROOT-PROBE-V1 item=$1 status=fail $2"
+            exit 1
+          }
+          gradle_user_home="${GRADLE_USER_HOME:-$HOME/.gradle}"
+          dists_dir="$gradle_user_home/wrapper/dists/gradle-8.10.2-bin"
+          [ -d "$dists_dir" ] || fail P7HIT "reason=dist-dir-missing dists=$dists_dir"
+          echo "NONROOT-PROBE-V1 item=P7HIT status=pass hit=1 dists=$dists_dir"
+          uv_cache="$(uv cache dir)"
+          venv="$RUNNER_TEMP/hit-uv-venv"
+          uv venv --quiet "$venv"
+          uv_hit=0
+          if uv pip install --quiet --offline --python "$venv/bin/python" six; then
+            uv_hit=1
+          fi
+          npm_cache="$(npm config get cache)"
+          npm_hit=0
+          [ -n "$(find "$npm_cache/_cacache" -type f -print -quit 2>/dev/null)" ] && npm_hit=1
+          if [ "$uv_hit" = "1" ] && [ "$npm_hit" = "1" ]; then
+            echo "NONROOT-PROBE-V1 item=P9HIT status=pass hit=1 uv_cache=$uv_cache uv_offline_install=ok npm_cache=$npm_cache"
+          else
+            fail P9HIT "reason=cache-miss uv_hit=$uv_hit npm_hit=$npm_hit uv_cache=$uv_cache npm_cache=$npm_cache"
+          fi

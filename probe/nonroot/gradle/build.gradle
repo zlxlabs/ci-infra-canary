@@ -1,0 +1,2 @@
+// Minimal build file: the probe only runs `./gradlew --version` (P7 identity
+// and wrapper-dist placement); no build tasks are declared on purpose.
