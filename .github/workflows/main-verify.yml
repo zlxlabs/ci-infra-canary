@@ -1,0 +1,32 @@
+# Main-branch push verification for this repository. The PR-side gate caller
+# (.github/workflows/gate.yml) only reacts to PR events, so merged main
+# commits had no push-triggered run of their own; this workflow gives every
+# main tip a verify run for verify-remote-main consumers.
+name: main-verify
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: [self-hosted, linux, ci]
+    timeout-minutes: 5
+    steps:
+      - name: Checkout canary
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Same command gate-v2 legacy auto-detection runs for this repo on PRs:
+      # no `test:` make target + pyproject.toml + uv.lock
+      # => `uv run --frozen pytest -q` (equivalent to `make unit`'s unittest run).
+      - name: Run unit tests
+        run: uv run --frozen pytest -q
