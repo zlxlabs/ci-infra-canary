@@ -3,6 +3,7 @@
 risk-tier: personal
 verify-remote: gate.yml
 verify-remote-main: main-verify.yml
+verify-remote-evidence: main-verify.yml / verify :: MAIN-VERIFY-TESTED-EVIDENCE-V1 sha=(?P<sha>[0-9a-f]{40}) suite=pytest
 
 本仓验证命令是 `make unit`（unittest discover，跑同一套 tests/）。PR 侧 gate quality
 与 main push 侧 main-verify workflow 实际执行 `uv run --frozen pytest -q`

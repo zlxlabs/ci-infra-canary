@@ -30,3 +30,8 @@ jobs:
       # => `uv run --frozen pytest -q` (equivalent to `make unit`'s unittest run).
       - name: Run unit tests
         run: uv run --frozen pytest -q
+
+      - name: emit tested evidence
+        run: |
+          head_sha=$(git rev-parse HEAD)
+          echo "MAIN-VERIFY-TESTED-EVIDENCE-V1 sha=${head_sha} suite=pytest"
