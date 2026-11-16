@@ -523,3 +523,5 @@ jobs:
           name: runner-artifact-canary-receipt
           path: ${{ runner.temp }}/runner-artifact-canary-receipt.v1.json
           if-no-files-found: error
+          # retention: 3 — 消费方 gate-hub 发布流水线 artifact-canary 阶段跨 run 下载（runner/release-pipeline/artifact_canary.py download_receipt）；理由 receipt 供当次 roll 校验即取，窗口分钟到小时级，3 天足够
+          retention-days: 3
