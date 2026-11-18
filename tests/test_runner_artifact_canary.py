@@ -210,6 +210,20 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
                           "docker restart", "systemctl"):
             self.assertNotIn(forbidden, deploy)
 
+    def test_deploy_host_pull_retries_three_attempts_keeps_fail_reason(self):
+        deploy = step_block(self.text, "Pull, inspect and remove probe image on deploy host")
+        # Bounded pull retry: max 3 attempts, 20s/40s intervals, each failure
+        # greppable on remote stderr; reason literal unchanged (gate-hub receipt
+        # parsing depends on deploy-host-pull-inspect-rmi-failed).
+        self.assertEqual(deploy.count("docker pull '$ref'"), 1)
+        self.assertIn("for attempt in 1 2 3; do", deploy)
+        self.assertIn("CANARY-DEPLOY-PULL-RETRY attempt=\\$attempt/3", deploy)
+        self.assertIn("sleep 20", deploy)
+        self.assertIn("sleep 40", deploy)
+        self.assertIn("fail deploy-host-pull-inspect-rmi-failed", deploy)
+        # inspect/rmi stay outside the retry loop.
+        self.assertLess(deploy.index("done"), deploy.index("docker image inspect"))
+
     def test_cleanup_step_always_runs_and_verifies_absence(self):
         cleanup = step_block(self.text, "Delete ACR tag and verify removal")
         self.assertIn("if: always()", cleanup)

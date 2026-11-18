@@ -276,11 +276,23 @@ jobs:
           # Exactly three remote actions: pull / image inspect / rmi. The remote
           # set -eu makes any of them (including rmi leftovers on n305) fail the
           # job — no warning-and-continue.
+          # pull alone is retried (max 3 attempts, 20s/40s intervals): three
+          # consecutive rolls died on transient ACR link timeouts; inspect/rmi
+          # stay single-shot and the failure reason literal is unchanged.
           if ! remote_out="$(ssh -i "$HOME/.ssh/id_deploy" \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=20 \
             "$DEPLOY_SSH_USER@$DEPLOY_HOST" \
             "set -eu
-             docker pull '$ref'
+             pull_ok=0
+             for attempt in 1 2 3; do
+               if docker pull '$ref'; then
+                 pull_ok=1
+                 break
+               fi
+               echo \"CANARY-DEPLOY-PULL-RETRY attempt=\$attempt/3\" >&2
+               case \$attempt in 1) sleep 20 ;; 2) sleep 40 ;; esac
+             done
+             [ \"\$pull_ok\" -eq 1 ] || exit 1
              echo \"CANARY-IMAGE-ID:\$(docker image inspect --format '{{.Id}}' '$ref')\"
              echo \"CANARY-REPO-DIGESTS:\$(docker image inspect --format '{{json .RepoDigests}}' '$ref')\"
              docker rmi '$ref'
