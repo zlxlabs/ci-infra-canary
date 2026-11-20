@@ -57,7 +57,7 @@ jobs:
           want_ci = f"canary-{fp}-{host}-ci"
           want_rev = f"canary-{fp}-{host}-review"
           ci, rev = data.get("ci_label"), data.get("review_label")
-          if not isinstance(ci, str) or ci not in ("", want_ci):
+          if not isinstance(ci, str) or ci not in ("", want_ci, want_ci + "-heavy"):
               fail("ci_label")
           if not isinstance(rev, str) or rev not in ("", want_rev):
               fail("review_label")
