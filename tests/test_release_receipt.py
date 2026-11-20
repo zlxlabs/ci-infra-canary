@@ -118,6 +118,42 @@ class ReleaseReceiptReaderScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(out, f"ci_label={CI_LABEL_CI}\nreview_label=\n".encode())
 
+    def test_valid_heavy_lane_ci_label_writes_exact_bytes(self):
+        heavy = CI_LABEL_BOTH + "-heavy"
+        result, out = self._run(_payload(ci_label=heavy))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            out,
+            f"ci_label={heavy}\nreview_label={REVIEW_LABEL_BOTH}\n".encode(),
+        )
+
+    def test_valid_heavy_lane_ci_with_empty_review_writes_verbatim(self):
+        heavy = CI_LABEL_BOTH + "-heavy"
+        result, out = self._run(_payload(ci_label=heavy, review_label=""))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(out, f"ci_label={heavy}\nreview_label=\n".encode())
+
+    def test_invalid_heavy_lane_variants_fail_loud_without_label_lines(self):
+        cases = {
+            "heavy-suffix-drift": _payload(ci_label=CI_LABEL_BOTH + "-heavyx"),
+            "light-lane-rejected": _payload(ci_label=f"canary-{FP}-{HOST_BOTH}-ci-light"),
+            "heavy-label-other-host": _payload(ci_label=f"canary-{FP}-{HOST_CI}-ci-heavy"),
+            "heavy-label-other-fingerprint": _payload(
+                ci_label=f"canary-ffffffffffff-{HOST_BOTH}-ci-heavy"
+            ),
+        }
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                result, out = self._run(payload)
+                combined = result.stdout + "\n" + result.stderr
+                self.assertNotEqual(result.returncode, 0, combined)
+                self.assertTrue(
+                    any(line.startswith(ANCHOR) for line in combined.splitlines()),
+                    combined,
+                )
+                self.assertNotIn(b"ci_label=", out)
+                self.assertNotIn(b"review_label=", out)
+
     def test_invalid_inputs_fail_loud_without_label_lines(self):
         cases = {
             "schema": _payload(schema="nope"),
