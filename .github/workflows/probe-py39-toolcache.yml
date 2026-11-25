@@ -1,0 +1,14 @@
+name: probe-py39-toolcache
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: [self-hosted, linux, ci]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - run: python --version
