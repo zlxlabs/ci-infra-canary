@@ -4,10 +4,14 @@
 # workflow before batch-roll and validates the receipt artifact it uploads:
 # `runner-artifact-canary-receipt.v1.json` (schema runner-artifact-canary-receipt.v1).
 #
-# gate-hub#2246: the push goes through push_to_acr.sh's real dual-push path
-# (LOCAL_REGISTRY job env below), the local manifest digest is read back from
-# the registry itself, and n305 also pulls the local ref — the n305 local pull
-# is advisory-only (recorded in the receipt, never part of the verdict).
+# gate-hub#2459: the verdict is decided by the LOCAL registry path — the push
+# goes through push_to_acr.sh's real dual-push path (LOCAL_REGISTRY job env
+# below), the local manifest digest is read back from the registry itself, and
+# n305 pulling the local ref (RepoDigests must carry <local_ref>@<local_digest>)
+# is the hard gate. The public-ACR pull and ACR tag cleanup on n305 are
+# advisory-only: their failures emit RUNNER-ARTIFACT-CANARY-ACR-ADVISORY
+# warnings and are recorded in the receipt (gate-hub's acr_advisory_status)
+# without failing the job or the verdict.
 # Non-goals: no cleanup of local-registry probe/buildcache tags
 # (gatehub-deploy-registry has no delete API; its 20 GiB whole-store sweep
 # covers them), no compose, no container start, no service restart on the
@@ -265,21 +269,25 @@ jobs:
         env:
           GIT_SHA_TAG: ${{ steps.push.outputs.git_sha_tag }}
         run: |
-          set -euo pipefail
-          fail() {
-            printf '%s' "$1" > "$RUNNER_TEMP/canary-failure-reason"
-            echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=$1"
-            exit 1
-          }
+          set -uo pipefail
+          # gate-hub#2459: the public-ACR pull leg is advisory-only. Any failure
+          # here (ACR i/o timeouts included) emits a
+          # RUNNER-ARTIFACT-CANARY-ACR-ADVISORY warning, records whatever was
+          # observed in deploy_image_id / deploy_repo_digests for the receipt
+          # and gate-hub's acr_advisory_status, and never fails the job or
+          # records a failure reason — the verdict is decided by the
+          # local-pull step below.
           acr_image="$ACR_REGISTRY/$ACR_NAMESPACE/$IMAGE_NAME"
           ref="$acr_image:$GIT_SHA_TAG"
-          # Exactly three remote actions: pull / image inspect / rmi. The remote
-          # set -eu makes any of them (including rmi leftovers on n305) fail the
-          # job — no warning-and-continue.
+          advisory() {
+            echo "::warning::RUNNER-ARTIFACT-CANARY-ACR-ADVISORY reason=$1"
+          }
+          # Exactly three remote actions: pull / image inspect / rmi.
           # pull alone is retried (max 3 attempts, 20s/40s intervals): three
           # consecutive rolls died on transient ACR link timeouts; inspect/rmi
-          # stay single-shot and the failure reason literal is unchanged.
-          if ! remote_out="$(ssh -i "$HOME/.ssh/id_deploy" \
+          # stay single-shot and the advisory reason literal is unchanged.
+          rc=0
+          if remote_out="$(ssh -i "$HOME/.ssh/id_deploy" \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=20 \
             "$DEPLOY_SSH_USER@$DEPLOY_HOST" \
             "set -eu
@@ -297,23 +305,35 @@ jobs:
              echo \"CANARY-REPO-DIGESTS:\$(docker image inspect --format '{{json .RepoDigests}}' '$ref')\"
              docker rmi '$ref'
             ")"; then
-            fail deploy-host-pull-inspect-rmi-failed
+            :
+          else
+            rc=$?
           fi
           image_id="$(sed -n 's/^CANARY-IMAGE-ID://p' <<<"$remote_out")"
           repo_digests="$(sed -n 's/^CANARY-REPO-DIGESTS://p' <<<"$remote_out")"
-          [ -n "$image_id" ] || fail deploy-host-image-id-missing
-          [ -n "$repo_digests" ] || fail deploy-host-repo-digests-missing
-          # PASS requires the pulled image's RepoDigests to carry the ACR
-          # identity — proves the host pulled THIS registry's bytes.
-          printf '%s' "$repo_digests" | grep -q "\"$acr_image@sha256:" \
-            || fail deploy-host-acr-repo-digest-missing
           echo "deploy_image_id=$image_id" >> "$GITHUB_OUTPUT"
           echo "deploy_repo_digests=$repo_digests" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            advisory deploy-host-pull-inspect-rmi-failed
+          elif [ -z "$image_id" ]; then
+            advisory deploy-host-image-id-missing
+          elif [ -z "$repo_digests" ]; then
+            advisory deploy-host-repo-digests-missing
+          elif ! printf '%s' "$repo_digests" | grep -q "\"$acr_image@sha256:"; then
+            # The pulled image's RepoDigests should carry the ACR identity —
+            # proves the host pulled THIS registry's bytes; advisory only now.
+            advisory deploy-host-acr-repo-digest-missing
+          fi
+          exit 0
 
-      # gate-hub#2246: advisory mirror of the ACR pull leg against the LOCAL
-      # registry. Recorded in the receipt as local_pull; must never fail the
-      # job (no continue-on-error either — the rc is captured with if so the
-      # receipt can tell pass/fail/skipped apart) and never feeds the verdict.
+      # gate-hub#2459: the n305 local-registry pull leg is the workflow's HARD
+      # GATE for the deploy host — the verdict requires status=pass with
+      # RepoDigests carrying exactly <local_ref>@<local_digest>. A failed pull
+      # writes canary-failure-reason=local-pull-failed, emits the error marker
+      # and exits non-zero (job fails); the receipt and artifact upload still
+      # run (both are if: always()). Missing prerequisites means the push or
+      # read-back leg already failed with its own reason — record skipped and
+      # exit 0 instead of masking it.
       - name: Pull probe image from local registry on deploy host
         id: local-pull
         if: always()
@@ -326,19 +346,25 @@ jobs:
           printf 'skipped' > "$status_file"
           printf '[]' > "$RUNNER_TEMP/canary-local-pull-digests"
           if [ -z "${GIT_SHA_TAG:-}" ] || [ -z "${LOCAL_DIGEST:-}" ]; then
-            echo "::notice::local pull skipped: no local digest (push or read-back did not succeed)"
+            echo "::notice::local pull skipped: no local digest (push or read-back already failed with its own reason)"
             exit 0
           fi
           local_ref="$LOCAL_REGISTRY/$ACR_NAMESPACE/$IMAGE_NAME"
           ref="$local_ref:$GIT_SHA_TAG"
-          # Same ssh credentials/known_hosts as the ACR deploy leg above.
+          fail() {
+            printf '%s' 'fail' > "$status_file"
+            printf '%s' "$1" > "$RUNNER_TEMP/canary-failure-reason"
+            echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=$1"
+            exit 1
+          }
+          # Same ssh credentials/known_hosts as the ACR advisory leg above.
           # Plain if/else (no `!`): inside else, $? is the ssh pipeline's real
           # rc — with `if !` it would be the negated status, always 0.
           rc=0
           if remote_out="$(ssh -i "$HOME/.ssh/id_deploy" \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=20 \
             "$DEPLOY_SSH_USER@$DEPLOY_HOST" \
-            "set -u
+            "set -eu
              docker pull '$ref'
              echo \"LOCAL-REPO-DIGESTS:\$(docker image inspect --format '{{json .RepoDigests}}' '$ref')\"
              docker rmi '$ref'
@@ -351,13 +377,11 @@ jobs:
           [ -n "$digests" ] || digests='[]'
           printf '%s' "$digests" > "$RUNNER_TEMP/canary-local-pull-digests"
           # pass only when the whole remote chain (pull/inspect/rmi) succeeded
-          # AND RepoDigests carries exactly <local_ref>@<local_digest>.
-          if [ "$rc" -eq 0 ] && printf '%s' "$digests" | grep -qF "\"$local_ref@$LOCAL_DIGEST\""; then
-            printf 'pass' > "$status_file"
-          else
-            printf 'fail' > "$status_file"
-            echo "::warning::local registry pull on deploy host failed (rc=$rc) — recorded in receipt, verdict unaffected"
-          fi
+          # AND RepoDigests carries exactly <local_ref>@<local_digest>;
+          # anything else is a hard failure (gate-hub#2459).
+          [ "$rc" -eq 0 ] || fail local-pull-failed
+          printf '%s' "$digests" | grep -qF "\"$local_ref@$LOCAL_DIGEST\"" || fail local-pull-failed
+          printf 'pass' > "$status_file"
           exit 0
 
       - name: Delete ACR tag and verify removal
@@ -369,12 +393,15 @@ jobs:
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
           GIT_SHA_TAG: ${{ steps.push.outputs.git_sha_tag }}
         run: |
-          set -euo pipefail
-          fail() {
+          set -uo pipefail
+          # gate-hub#2459: the ACR tag cleanup is advisory-only — a failed
+          # cleanup records 'failed' in the receipt's cleanup field and emits
+          # the advisory warning; it must never fail the job or the verdict.
+          advisory() {
             printf '%s' 'failed' > "$RUNNER_TEMP/canary-cleanup-status"
-            printf '%s' "$1" > "$RUNNER_TEMP/canary-failure-reason"
-            echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=$1"
-            exit 1
+            echo "::warning::RUNNER-ARTIFACT-CANARY-ACR-ADVISORY reason=acr-cleanup-failed"
+            echo "cleanup advisory detail: $1"
+            exit 0
           }
           set_status() { printf '%s' "$1" > "$RUNNER_TEMP/canary-cleanup-status"; }
           if [ -z "$GIT_SHA_TAG" ]; then
@@ -388,7 +415,7 @@ jobs:
           if ! printf '%s' "$ACR_USERNAME$ACR_PASSWORD" | python3 -c '
           import re, sys
           sys.exit(0 if re.fullmatch(r"[^\"\\\s]+", sys.stdin.read()) else 1)'; then
-            fail acr-secret-shape-unsafe
+            advisory acr-secret-shape-unsafe
           fi
           repo="$ACR_NAMESPACE/$IMAGE_NAME"
           service='registry.aliyuncs.com:cn-guangzhou:26842'
@@ -402,7 +429,7 @@ jobs:
             | curl -fsS --config - -H 'Accept: application/json' \
               "$realm?service=$service&scope=repository:$repo:*" \
             | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')"; then
-            fail cleanup-token-failed
+            advisory cleanup-token-failed
           fi
           headers_file="$RUNNER_TEMP/canary-cleanup-headers.txt"
           if ! get_code="$(curl -sS -o /dev/null -D "$headers_file" -w '%{http_code}' \
@@ -412,28 +439,28 @@ jobs:
           fi
           if [ "$get_code" = "200" ]; then
             digest="$(tr -d '\r' < "$headers_file" | awk 'tolower($1)=="docker-content-digest:"{print $2}')"
-            [ -n "$digest" ] || fail cleanup-digest-lookup-failed
+            [ -n "$digest" ] || advisory cleanup-digest-lookup-failed
             echo "$digest" > "$RUNNER_TEMP/canary-acr-digest"
             if ! del_code="$(printf 'user = "%s:%s"\n' "$ACR_USERNAME" "$ACR_PASSWORD" \
               | curl -sS --config - -o /dev/null -w '%{http_code}' \
                 -X DELETE -H "Authorization: Bearer $token" \
                 "https://$ACR_REGISTRY/v2/$repo/manifests/$digest")"; then
-              fail cleanup-delete-curl-failed
+              advisory cleanup-delete-curl-failed
             fi
-            [ "$del_code" = "202" ] || fail "cleanup-delete-http-$del_code"
+            [ "$del_code" = "202" ] || advisory "cleanup-delete-http-$del_code"
           elif [ "$get_code" = "404" ]; then
             # Tag already absent (e.g. push failed before upload): nothing to
             # delete, the invariant "tag does not exist" already holds.
             :
           else
-            fail "cleanup-tag-lookup-http-$get_code"
+            advisory "cleanup-tag-lookup-http-$get_code"
           fi
           # Read-back proof: the tag must be gone, verbatim "no such manifest".
           inspect_out="$RUNNER_TEMP/canary-cleanup-inspect.txt"
           if docker manifest inspect "$ACR_REGISTRY/$repo:$GIT_SHA_TAG" >"$inspect_out" 2>&1; then
-            fail cleanup-verify-tag-still-exists
+            advisory cleanup-verify-tag-still-exists
           fi
-          grep -q 'no such manifest' "$inspect_out" || fail cleanup-verify-inconclusive
+          grep -q 'no such manifest' "$inspect_out" || advisory cleanup-verify-inconclusive
           set_status deleted
 
       - name: Write receipt
@@ -450,8 +477,6 @@ jobs:
           DEPLOY_HOST_ENV: ${{ env.DEPLOY_HOST }}
           IDENTITY_CONCLUSION: ${{ steps.identity.conclusion }}
           PUSH_CONCLUSION: ${{ steps.push.conclusion }}
-          DEPLOY_CONCLUSION: ${{ steps.deploy.conclusion }}
-          CLEANUP_CONCLUSION: ${{ steps.cleanup.conclusion }}
           LOCAL_REGISTRY_ENV: ${{ env.LOCAL_REGISTRY }}
           LOCAL_TAG: ${{ steps.push.outputs.git_sha_tag }}
           DOCKER_SERVER_VERSION: ${{ steps.identity.outputs.docker_server_version }}
@@ -475,19 +500,19 @@ jobs:
 
           identity_ok = os.environ["IDENTITY_CONCLUSION"] == "success"
           push_ok = os.environ["PUSH_CONCLUSION"] == "success"
-          deploy_ok = os.environ["DEPLOY_CONCLUSION"] == "success"
-          cleanup_ok = os.environ["CLEANUP_CONCLUSION"] == "success"
           # Local push is a hard gate: the digest read back from the local
           # registry must be a well-formed sha256 manifest digest.
           local_digest = read_file("canary-local-digest", "")
           local_ok = re.fullmatch(r"sha256:[0-9a-f]{64}", local_digest) is not None
-          verdict = "pass" if (identity_ok and push_ok and deploy_ok and cleanup_ok and local_ok) else "fail"
-          cleanup_status = read_file("canary-cleanup-status", "unknown")
-          # local_pull is advisory-only: read for the receipt, never part of
-          # the verdict above.
+          # gate-hub#2459: the n305 local-registry pull is the hard gate for the
+          # deploy-host leg — verdict requires local_pull status=pass. The ACR
+          # deploy/cleanup legs are advisory-only and never feed the verdict.
           local_pull_status = read_file("canary-local-pull-status", "skipped")
           if local_pull_status not in ("pass", "fail", "skipped"):
               local_pull_status = "skipped"
+          local_pull_ok = local_pull_status == "pass"
+          verdict = "pass" if (identity_ok and push_ok and local_ok and local_pull_ok) else "fail"
+          cleanup_status = read_file("canary-cleanup-status", "unknown")
           if verdict == "pass":
               failure_reason = ""
           else:
