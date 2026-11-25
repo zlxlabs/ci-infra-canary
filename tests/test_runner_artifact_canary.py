@@ -169,31 +169,40 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
         self.assertIn('printf \'%s\' "$digest" > "$RUNNER_TEMP/canary-local-digest"', readback)
         self.assertIn('echo "local_digest=$digest" >> "$GITHUB_OUTPUT"', readback)
 
-    def test_local_pull_step_is_advisory_only(self):
+    def test_local_pull_step_is_hard_gate_for_verdict(self):
         local_pull = step_block(self.text, "Pull probe image from local registry on deploy host")
-        # rc must be captured with an explicit if so the receipt can record
-        # the outcome; continue-on-error would hide the status from it.
+        # gate-hub#2459: the local pull decides the verdict. rc must still be
+        # captured with an explicit plain if/else (no `!` so $? inside else is
+        # the real ssh rc) so every outcome lands in the receipt status file.
         self.assertNotIn("continue-on-error", local_pull)
-        # Plain if/else capture (no `!`): with `if ! cmd`, $? inside the else
-        # branch would be the negated status, not the ssh rc.
         self.assertIn("if remote_out=", local_pull)
         self.assertNotIn("if ! remote_out=", local_pull)
         self.assertIn("rc=$?", local_pull)
-        # The step never fails the job: no failure marker, no exit 1, and an
-        # unconditional exit 0 at the end.
-        self.assertNotIn("RUNNER-ARTIFACT-CANARY-FAIL", local_pull)
-        self.assertNotIn("exit 1", local_pull)
-        self.assertTrue(local_pull.rstrip().endswith("exit 0"))
-        # Same ssh credentials and known_hosts wiring as the ACR deploy leg.
-        self.assertIn('ssh -i "$HOME/.ssh/id_deploy"', local_pull)
-        # pass requires RepoDigests to carry exactly <local_ref>@<local_digest>.
-        self.assertIn('grep -qF "\\"$local_ref@$LOCAL_DIGEST\\""', local_pull)
-        # Receipt files for all three statuses.
         self.assertIn("canary-local-pull-status", local_pull)
         self.assertIn("canary-local-pull-digests", local_pull)
-        # local_pull must not feed the verdict (see the receipt verdict line).
+        # pass requires RepoDigests to carry exactly <local_ref>@<local_digest>.
+        self.assertIn('grep -qF "\\"$local_ref@$LOCAL_DIGEST\\""', local_pull)
+        # Failure is hard: reason recorded, error marker emitted via the fail
+        # helper (same shape as the other hard-gate steps), step exits
+        # non-zero so the job and the verdict fail.
+        self.assertIn("fail local-pull-failed", local_pull)
+        self.assertIn('echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=$1"', local_pull)
+        self.assertIn('printf \'%s\' "$1" > "$RUNNER_TEMP/canary-failure-reason"', local_pull)
+        self.assertIn("exit 1", local_pull)
+        # Missing prerequisites cannot invent a local-pull failure: status
+        # skipped with exit 0 — the push/read-back leg already failed with its
+        # own reason (masking it would corrupt the receipt's failure_reason).
+        self.assertIn("printf 'skipped' > \"$status_file\"", local_pull)
+        self.assertIn("::notice::local pull skipped", local_pull)
+        self.assertNotIn("local-pull-failed", local_pull.split("::notice::")[0])
+        # Same ssh credentials and known_hosts wiring as the ACR advisory leg.
+        self.assertIn('ssh -i "$HOME/.ssh/id_deploy"', local_pull)
+        # Success path ends the step cleanly; the receipt (if: always()) and
+        # the artifact upload still run afterwards.
+        self.assertTrue(local_pull.rstrip().endswith("exit 0"))
+        # The receipt verdict formula must include local_pull_ok.
         receipt = step_block(self.text, "Write receipt")
-        self.assertNotIn("local_pull_ok", receipt.split("verdict =")[1].splitlines()[0])
+        self.assertIn("local_pull_ok", receipt.split("verdict =")[1].splitlines()[0])
 
     def test_deploy_host_runs_only_pull_inspect_rmi_over_ssh(self):
         deploy = step_block(self.text, "Pull, inspect and remove probe image on deploy host")
@@ -209,18 +218,38 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
         for forbidden in ("docker compose", "docker-compose", "docker run", "docker start",
                           "docker restart", "systemctl"):
             self.assertNotIn(forbidden, deploy)
+        # gate-hub#2459: the public-ACR pull leg is advisory — failures emit the
+        # ACR-ADVISORY warning (via the advisory helper) and never fail the job
+        # or write a failure reason; observed values still go to
+        # deploy_image_id/deploy_repo_digests.
+        self.assertIn("advisory deploy-host-pull-inspect-rmi-failed", deploy)
+        self.assertIn('echo "::warning::RUNNER-ARTIFACT-CANARY-ACR-ADVISORY reason=$1"', deploy)
+        self.assertNotIn("RUNNER-ARTIFACT-CANARY-FAIL", deploy)
+        # The run body must not write the failure reason (the step-block text
+        # extends into the next step's comment, which mentions the literal;
+        # cut the body at the blank line before the next comment).
+        run_body = deploy.split("run: |", 1)[1].split("\n\n      #", 1)[0]
+        self.assertNotIn("canary-failure-reason", run_body)
+        self.assertIn("exit 0", deploy)
+        # No step-level exit 1: the only exit 1 inside this block is the remote
+        # pull_ok guard inside the ssh payload (it turns a remote failure into
+        # a non-zero ssh rc, which the advisory() branch converts to a warning).
+        for line in deploy.splitlines():
+            if "exit 1" in line:
+                self.assertIn("pull_ok", line)
 
-    def test_deploy_host_pull_retries_three_attempts_keeps_fail_reason(self):
+    def test_deploy_host_pull_retries_three_attempts_advisory_only(self):
         deploy = step_block(self.text, "Pull, inspect and remove probe image on deploy host")
         # Bounded pull retry: max 3 attempts, 20s/40s intervals, each failure
-        # greppable on remote stderr; reason literal unchanged (gate-hub receipt
-        # parsing depends on deploy-host-pull-inspect-rmi-failed).
+        # greppable on remote stderr. gate-hub#2459: the historical ACR-timeout
+        # reason literal survives as the advisory reason vocabulary for
+        # gate-hub's acr_advisory_status.
         self.assertEqual(deploy.count("docker pull '$ref'"), 1)
         self.assertIn("for attempt in 1 2 3; do", deploy)
         self.assertIn("CANARY-DEPLOY-PULL-RETRY attempt=\\$attempt/3", deploy)
         self.assertIn("sleep 20", deploy)
         self.assertIn("sleep 40", deploy)
-        self.assertIn("fail deploy-host-pull-inspect-rmi-failed", deploy)
+        self.assertIn("advisory deploy-host-pull-inspect-rmi-failed", deploy)
         # inspect/rmi stay outside the retry loop.
         self.assertLess(deploy.index("done"), deploy.index("docker image inspect"))
 
@@ -233,9 +262,19 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
         self.assertIn('"https://$ACR_REGISTRY/v2/$repo/manifests/$digest")', cleanup)
         # Read-back proof: the tag must be gone, verbatim "no such manifest".
         self.assertIn('grep -q \'no such manifest\'', cleanup)
-        self.assertIn("fail cleanup-verify-tag-still-exists", cleanup)
-        self.assertIn("fail cleanup-verify-inconclusive", cleanup)
-        self.assertIn('echo "::error::RUNNER-ARTIFACT-CANARY-FAIL reason=$1"', cleanup)
+        self.assertIn("advisory cleanup-verify-tag-still-exists", cleanup)
+        self.assertIn("advisory cleanup-verify-inconclusive", cleanup)
+        # gate-hub#2459: cleanup is advisory — a failed cleanup records
+        # 'failed' in the receipt's cleanup field, emits the advisory warning
+        # and exits 0; it never fails the job or the verdict.
+        self.assertIn("::warning::RUNNER-ARTIFACT-CANARY-ACR-ADVISORY reason=acr-cleanup-failed", cleanup)
+        self.assertIn('printf \'%s\' \'failed\' > "$RUNNER_TEMP/canary-cleanup-status"', cleanup)
+        self.assertNotIn("RUNNER-ARTIFACT-CANARY-FAIL", cleanup)
+        self.assertNotIn("exit 1", cleanup)
+        self.assertNotIn("canary-failure-reason", cleanup)
+        # Honest result recording: deleted / failed / skipped all reachable.
+        self.assertIn("set_status deleted", cleanup)
+        self.assertIn("set_status skipped", cleanup)
 
     def test_upload_artifact_step_always_runs(self):
         upload = step_block(self.text, "Upload receipt artifact")
@@ -249,9 +288,15 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
         for field in RECEIPT_FIELDS:
             self.assertIn(f'"{field}"', receipt, field)
         self.assertIn(
-            'verdict = "pass" if (identity_ok and push_ok and deploy_ok and cleanup_ok and local_ok) else "fail"',
+            'verdict = "pass" if (identity_ok and push_ok and local_ok and local_pull_ok) else "fail"',
             receipt,
         )
+        # gate-hub#2459: the ACR deploy/cleanup conclusions are advisory and
+        # must not appear anywhere in the verdict computation; local_pull_ok
+        # derives from the local-pull status file.
+        self.assertNotIn("deploy_ok", receipt)
+        self.assertNotIn("cleanup_ok", receipt)
+        self.assertIn('local_pull_ok = local_pull_status == "pass"', receipt)
         # Local push/read-back failure is a hard gate with its own reason;
         # the receipt re-validates the digest shape itself.
         self.assertIn('failure_reason = "local-push-failed" if not local_ok else "unknown-step-failure"', receipt)
@@ -262,14 +307,20 @@ class RunnerArtifactCanaryWorkflowContractTests(unittest.TestCase):
         self.assertIn('"repo_digests": json.loads(read_file("canary-local-pull-digests") or "[]")', receipt)
 
     def test_failure_marker_is_emitted_and_job_fails(self):
+        # Hard-gate steps only: identity, push, local digest read-back and the
+        # local pull (gate-hub#2459). The ACR deploy/cleanup legs are advisory
+        # and must not carry the error marker.
         for step_name in ("Record runner identity and enforce engine contract",
                           "Build and push probe image to ACR",
                           "Read back local registry digest",
-                          "Pull, inspect and remove probe image on deploy host",
-                          "Delete ACR tag and verify removal"):
+                          "Pull probe image from local registry on deploy host"):
             block = step_block(self.text, step_name)
             self.assertIn("RUNNER-ARTIFACT-CANARY-FAIL reason=", block, step_name)
             self.assertIn("exit 1", block, step_name)
+        for advisory_step in ("Pull, inspect and remove probe image on deploy host",
+                              "Delete ACR tag and verify removal"):
+            block = step_block(self.text, advisory_step)
+            self.assertNotIn("RUNNER-ARTIFACT-CANARY-FAIL", block, advisory_step)
 
     def test_timeouts_keep_workflow_within_fifteen_minutes(self):
         self.assertIn("timeout-minutes: 2", job_block(self.text, "validate-inputs"))
