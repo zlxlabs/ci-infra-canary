@@ -47,3 +47,5 @@ class CanarySuccessRateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# smoke 1126c: no-op line to start a new review round
