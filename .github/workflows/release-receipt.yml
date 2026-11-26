@@ -55,9 +55,10 @@ jobs:
           if not isinstance(host, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", host):
               fail("host")
           want_ci = f"canary-{fp}-{host}-ci"
+          want_main_red = f"canary-{fp}-{host}-main-red"
           want_rev = f"canary-{fp}-{host}-review"
           ci, rev = data.get("ci_label"), data.get("review_label")
-          if not isinstance(ci, str) or ci not in ("", want_ci, want_ci + "-heavy"):
+          if not isinstance(ci, str) or ci not in ("", want_ci, want_ci + "-heavy", want_main_red):
               fail("ci_label")
           if not isinstance(rev, str) or rev not in ("", want_rev):
               fail("review_label")

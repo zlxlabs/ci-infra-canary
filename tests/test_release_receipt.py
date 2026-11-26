@@ -15,6 +15,7 @@ HOST_BOTH, HOST_CI = "ci-01", "ci-03"
 CI_LABEL_BOTH = f"canary-{FP}-{HOST_BOTH}-ci"
 REVIEW_LABEL_BOTH = f"canary-{FP}-{HOST_BOTH}-review"
 CI_LABEL_CI = f"canary-{FP}-{HOST_CI}-ci"
+MAIN_RED_LABEL_BOTH = f"canary-{FP}-{HOST_BOTH}-main-red"
 LEGACY_LABEL_BOTH = f"canary-{FP}-{HOST_BOTH}"
 
 
@@ -132,6 +133,42 @@ class ReleaseReceiptReaderScriptTests(unittest.TestCase):
         result, out = self._run(_payload(ci_label=heavy, review_label=""))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(out, f"ci_label={heavy}\nreview_label=\n".encode())
+
+    def test_valid_main_red_lane_ci_label_writes_exact_bytes(self):
+        result, out = self._run(_payload(ci_label=MAIN_RED_LABEL_BOTH))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            out,
+            f"ci_label={MAIN_RED_LABEL_BOTH}\nreview_label={REVIEW_LABEL_BOTH}\n".encode(),
+        )
+
+    def test_valid_main_red_lane_ci_with_empty_review_writes_verbatim(self):
+        result, out = self._run(_payload(ci_label=MAIN_RED_LABEL_BOTH, review_label=""))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(out, f"ci_label={MAIN_RED_LABEL_BOTH}\nreview_label=\n".encode())
+
+    def test_invalid_main_red_lane_variants_fail_loud_without_label_lines(self):
+        cases = {
+            "main-red-suffix-drift": _payload(ci_label=MAIN_RED_LABEL_BOTH + "x"),
+            "main-red-ci-suffix": _payload(ci_label=f"canary-{FP}-{HOST_BOTH}-ci-main-red"),
+            "main-red-label-other-host": _payload(
+                ci_label=f"canary-{FP}-{HOST_CI}-main-red"
+            ),
+            "main-red-label-other-fingerprint": _payload(
+                ci_label=f"canary-ffffffffffff-{HOST_BOTH}-main-red"
+            ),
+        }
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                result, out = self._run(payload)
+                combined = result.stdout + "\n" + result.stderr
+                self.assertNotEqual(result.returncode, 0, combined)
+                self.assertTrue(
+                    any(line.startswith(f"{ANCHOR} ci_label") for line in combined.splitlines()),
+                    combined,
+                )
+                self.assertNotIn(b"ci_label=", out)
+                self.assertNotIn(b"review_label=", out)
 
     def test_invalid_heavy_lane_variants_fail_loud_without_label_lines(self):
         cases = {
